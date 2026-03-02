@@ -76,7 +76,7 @@ jobs:
           cargo rustc --release --target ${{ matrix.rust_target }} --features ffi --crate-type cdylib
 
       - name: Upload native artifact
-        uses: actions/upload-artifact@v6
+        uses: actions/upload-artifact@v7
         with:
           name: native-${{ matrix.rid }}
           path: target/${{ matrix.rust_target }}/release/${{ matrix.lib_name }}
@@ -142,7 +142,7 @@ jobs:
           dotnet pack -c Release -o ../packages
 
       - name: Upload NuGet artifact
-        uses: actions/upload-artifact@v6
+        uses: actions/upload-artifact@v7
         with:
           name: nuget-package
           path: ffi/csharp/packages/*.nupkg
