@@ -79,18 +79,25 @@ impl DbUserRepository {
     }
 }
 
-#[derive(Debug, Clone)]
+// The warning related to unused fields: name, data
+// Since these are kept for demonstration purposes or potential future use,
+// we can suppress the warning here.
+#[allow(dead_code)]
 struct CacheService {
     name: String,
     data: Vec<u8>,
 }
 
-#[derive(Debug, Clone)]
+// The warning related to unused fields: session_id
+// Since this is a mock session manager, we ignore the unused warning.
+#[allow(dead_code)]
 struct SessionManager {
     session_id: String,
 }
 
-#[derive(Debug, Clone)]
+// The warning related to unused fields: logger
+// Since this is a mock service, we ignore the unused warning.
+#[allow(dead_code)]
 struct AuthService {
     logger: Arc<ConsoleLogger>,
 }

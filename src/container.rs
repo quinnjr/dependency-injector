@@ -1228,7 +1228,7 @@ pub struct PooledScope<'a> {
     pool: &'a ScopePool,
 }
 
-impl<'a> PooledScope<'a> {
+impl PooledScope<'_> {
     /// Get a reference to the underlying container.
     #[inline]
     pub fn container(&self) -> &Container {
@@ -1236,7 +1236,7 @@ impl<'a> PooledScope<'a> {
     }
 }
 
-impl<'a> std::ops::Deref for PooledScope<'a> {
+impl std::ops::Deref for PooledScope<'_> {
     type Target = Container;
 
     #[inline]
@@ -1245,7 +1245,7 @@ impl<'a> std::ops::Deref for PooledScope<'a> {
     }
 }
 
-impl<'a> Drop for PooledScope<'a> {
+impl Drop for PooledScope<'_> {
     fn drop(&mut self) {
         if let Some(container) = self.container.take() {
             self.pool.release(container);
@@ -1266,7 +1266,7 @@ impl std::fmt::Debug for Container {
             .field("depth", &self.depth)
             .field("has_parent", &self.parent_storage.is_some())
             .field("locked", &self.is_locked())
-            .finish()
+            .finish_non_exhaustive()
     }
 }
 

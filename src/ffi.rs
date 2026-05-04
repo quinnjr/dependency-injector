@@ -175,12 +175,11 @@ pub unsafe extern "C" fn di_register_singleton(
     }
 
     // SAFETY: Caller guarantees type_name is valid
-    let type_name_str = match unsafe { CStr::from_ptr(type_name) }.to_str() {
-        Ok(s) => s.to_string(),
-        Err(_) => {
-            set_last_error("Type name is not valid UTF-8");
-            return DiErrorCode::InvalidArgument;
-        }
+    let type_name_str = if let Ok(s) = unsafe { CStr::from_ptr(type_name) }.to_str() {
+        s.to_string()
+    } else {
+        set_last_error("Type name is not valid UTF-8");
+        return DiErrorCode::InvalidArgument;
     };
 
     // Validate data
@@ -231,6 +230,11 @@ pub unsafe extern "C" fn di_register_singleton(
 ///
 /// # Returns
 /// Error code indicating success or failure.
+///
+/// # Safety
+/// - `container` must be a valid pointer to a `DiContainer` returned from `di_container_create`
+/// - `type_name` must be a valid null-terminated C string
+/// - `json_data` must be a valid null-terminated C string
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn di_register_singleton_json(
     container: *mut DiContainer,
@@ -424,6 +428,10 @@ pub unsafe extern "C" fn di_resolve_json(
 ///
 /// # Returns
 /// 1 if the service is registered, 0 if not, -1 on error.
+///
+/// # Safety
+/// - `container` must be a valid pointer to a `DiContainer`
+/// - `type_name` must be a valid null-terminated C string
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn di_contains(container: *mut DiContainer, type_name: *const c_char) -> i32 {
     if container.is_null() || type_name.is_null() {
@@ -456,6 +464,9 @@ pub unsafe extern "C" fn di_contains(container: *mut DiContainer, type_name: *co
 /// # Returns
 /// Pointer to the service data, or NULL on error.
 /// The pointer is valid until the service is freed.
+///
+/// # Safety
+/// - `service` must be a valid pointer to a `DiService` returned from `di_resolve`
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn di_service_data(service: *const DiService) -> *const u8 {
     if service.is_null() {
@@ -469,6 +480,9 @@ pub unsafe extern "C" fn di_service_data(service: *const DiService) -> *const u8
 ///
 /// # Returns
 /// Length of the service data in bytes, or 0 on error.
+///
+/// # Safety
+/// - `service` must be a valid pointer to a `DiService` returned from `di_resolve`
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn di_service_data_len(service: *const DiService) -> usize {
     if service.is_null() {
@@ -483,6 +497,9 @@ pub unsafe extern "C" fn di_service_data_len(service: *const DiService) -> usize
 /// # Returns
 /// Pointer to the null-terminated type name, or NULL on error.
 /// The pointer is valid until the service is freed.
+///
+/// # Safety
+/// - `service` must be a valid pointer to a `DiService` returned from `di_resolve`
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn di_service_type_name(service: *const DiService) -> *const c_char {
     if service.is_null() {
@@ -574,6 +591,9 @@ pub extern "C" fn di_version() -> *const c_char {
 ///
 /// # Returns
 /// The number of services, or -1 on error.
+///
+/// # Safety
+/// - `container` must be a valid pointer to a `DiContainer`
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn di_service_count(container: *const DiContainer) -> i64 {
     if container.is_null() {

@@ -42,7 +42,7 @@ pub enum DiError {
 }
 
 impl DiError {
-    /// Create a NotFound error for a type
+    /// Create a `NotFound` error for a type
     #[inline]
     pub fn not_found<T: 'static>() -> Self {
         Self::NotFound {
@@ -51,7 +51,7 @@ impl DiError {
         }
     }
 
-    /// Create a CreationFailed error
+    /// Create a `CreationFailed` error
     #[inline]
     pub fn creation_failed<T: 'static>(reason: impl Into<String>) -> Self {
         Self::CreationFailed {
@@ -60,7 +60,7 @@ impl DiError {
         }
     }
 
-    /// Create an AlreadyRegistered error
+    /// Create an `AlreadyRegistered` error
     #[inline]
     pub fn already_registered<T: 'static>() -> Self {
         Self::AlreadyRegistered {
@@ -68,7 +68,7 @@ impl DiError {
         }
     }
 
-    /// Create a CircularDependency error
+    /// Create a `CircularDependency` error
     #[inline]
     pub fn circular<T: 'static>() -> Self {
         Self::CircularDependency {
