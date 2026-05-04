@@ -1,6 +1,6 @@
 [package]
 name = "dependency-injector"
-version = "0.2.2"
+version = "1.0.0"
 edition = "2024"
 rust-version = "1.85"
 description = "High-performance, lock-free dependency injection container for Rust"
