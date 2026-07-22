@@ -104,7 +104,7 @@ jobs:
       - name: Prepare release assets
         run: |
           mkdir -p release
-          find artifacts -type f -name "*.so" -o -name "*.dylib" -o -name "*.dll" | while read f; do
+          find artifacts -type f \( -name "*.so" -o -name "*.dylib" -o -name "*.dll" \) | while read f; do
             cp "$f" release/
           done
           ls -la release/
