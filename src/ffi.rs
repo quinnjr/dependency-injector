@@ -18,17 +18,25 @@
 //! # Thread Safety
 //!
 //! The container is thread-safe. All FFI functions can be called from multiple threads.
+//! Panics are caught at the FFI boundary (never unwinding into the caller) and surfaced
+//! via `di_error_message()`.
 
+use crate::error::DiError;
 use std::any::Any;
 use std::collections::{HashMap, hash_map::Entry};
 use std::ffi::{CStr, CString, c_char};
+use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::ptr;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, RwLock};
 
 /// Opaque container handle for FFI
 pub struct DiContainer {
     /// Map of type names to their registered services (as raw bytes)
     services: RwLock<HashMap<String, Arc<dyn Any + Send + Sync>>>,
+    /// Lock state - when set, registration is blocked (removal is not),
+    /// matching the core container's locking semantics.
+    locked: AtomicBool,
 }
 
 /// Opaque service handle for FFI
@@ -53,6 +61,27 @@ pub enum DiErrorCode {
     InternalError = 4,
     /// Serialization/deserialization error
     SerializationError = 5,
+    /// Container is locked - registration is not allowed
+    Locked = 6,
+}
+
+/// Maps core [`DiError`] values to ABI error codes.
+///
+/// `CircularDependency`, `CreationFailed`, `ParentDropped`, and `Internal`
+/// currently collapse to [`DiErrorCode::InternalError`]; dedicated codes for
+/// them can be added to the ABI in a future major version.
+impl From<&DiError> for DiErrorCode {
+    fn from(err: &DiError) -> Self {
+        match err {
+            DiError::NotFound { .. } => Self::NotFound,
+            DiError::AlreadyRegistered { .. } => Self::AlreadyRegistered,
+            DiError::Locked => Self::Locked,
+            DiError::CircularDependency { .. }
+            | DiError::CreationFailed { .. }
+            | DiError::ParentDropped
+            | DiError::Internal(_) => Self::InternalError,
+        }
+    }
 }
 
 /// Result type for FFI operations
@@ -81,6 +110,30 @@ fn set_last_error(msg: impl Into<String>) {
     });
 }
 
+/// Run `f`, catching any panic so it cannot unwind across the FFI boundary.
+///
+/// On panic, records "internal panic: <message>" as the thread-local last
+/// error (via [`set_last_error`]) and returns `default` instead. Raw-pointer
+/// arguments captured by `f` are not `UnwindSafe`, hence [`AssertUnwindSafe`];
+/// the pointers themselves are plain values that cannot be observed in a
+/// broken state, so this is sound.
+fn ffi_guard<T>(default: T, f: impl FnOnce() -> T) -> T {
+    match catch_unwind(AssertUnwindSafe(f)) {
+        Ok(value) => value,
+        Err(payload) => {
+            let msg = if let Some(s) = payload.downcast_ref::<&str>() {
+                format!("internal panic: {s}")
+            } else if let Some(s) = payload.downcast_ref::<String>() {
+                format!("internal panic: {s}")
+            } else {
+                String::from("internal panic")
+            };
+            set_last_error(msg);
+            default
+        }
+    }
+}
+
 // ============================================================================
 // Container Lifecycle
 // ============================================================================
@@ -94,10 +147,13 @@ fn set_last_error(msg: impl Into<String>) {
 /// The returned pointer must be freed with `di_container_free()`.
 #[unsafe(no_mangle)]
 pub extern "C" fn di_container_new() -> *mut DiContainer {
-    let container = Box::new(DiContainer {
-        services: RwLock::new(HashMap::new()),
-    });
-    Box::into_raw(container)
+    ffi_guard(ptr::null_mut(), || {
+        let container = Box::new(DiContainer {
+            services: RwLock::new(HashMap::new()),
+            locked: AtomicBool::new(false),
+        });
+        Box::into_raw(container)
+    })
 }
 
 /// Free a container and all its resources.
@@ -107,10 +163,12 @@ pub extern "C" fn di_container_new() -> *mut DiContainer {
 /// - After calling this function, the pointer is invalid
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn di_container_free(container: *mut DiContainer) {
-    if !container.is_null() {
-        // SAFETY: Caller guarantees container is valid
-        drop(unsafe { Box::from_raw(container) });
-    }
+    ffi_guard((), || {
+        if !container.is_null() {
+            // SAFETY: Caller guarantees container is valid
+            drop(unsafe { Box::from_raw(container) });
+        }
+    });
 }
 
 /// Create a child scope from a container.
@@ -118,7 +176,8 @@ pub unsafe extern "C" fn di_container_free(container: *mut DiContainer) {
 /// Inheritance is a snapshot taken at creation time: the child receives a
 /// copy of the parent's services as they exist when the scope is created.
 /// Services registered in the parent afterwards are not visible to existing
-/// child scopes.
+/// child scopes. The child starts unlocked regardless of the parent's lock
+/// state, matching the core container's scoping semantics.
 ///
 /// # Returns
 /// A pointer to the new scoped container, or NULL on failure.
@@ -128,21 +187,24 @@ pub unsafe extern "C" fn di_container_free(container: *mut DiContainer) {
 /// - The returned pointer must be freed with `di_container_free()`
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn di_container_scope(container: *mut DiContainer) -> *mut DiContainer {
-    if container.is_null() {
-        set_last_error("Container pointer is null");
-        return ptr::null_mut();
-    }
+    ffi_guard(ptr::null_mut(), || {
+        if container.is_null() {
+            set_last_error("Container pointer is null");
+            return ptr::null_mut();
+        }
 
-    // SAFETY: Caller guarantees container is valid
-    let parent = unsafe { &*container };
+        // SAFETY: Caller guarantees container is valid
+        let parent = unsafe { &*container };
 
-    // Clone the services map for the child scope
-    let services = parent.services.read().unwrap().clone();
+        // Clone the services map for the child scope
+        let services = parent.services.read().unwrap().clone();
 
-    let child = Box::new(DiContainer {
-        services: RwLock::new(services),
-    });
-    Box::into_raw(child)
+        let child = Box::new(DiContainer {
+            services: RwLock::new(services),
+            locked: AtomicBool::new(false),
+        });
+        Box::into_raw(child)
+    })
 }
 
 // ============================================================================
@@ -158,7 +220,8 @@ pub unsafe extern "C" fn di_container_scope(container: *mut DiContainer) -> *mut
 /// - `data_len` - Length of the data in bytes
 ///
 /// # Returns
-/// Error code indicating success or failure.
+/// Error code indicating success or failure. Returns `Locked` if the
+/// container has been locked with `di_lock()`.
 ///
 /// # Safety
 /// - `container` must be a valid container pointer
@@ -171,57 +234,65 @@ pub unsafe extern "C" fn di_register_singleton(
     data: *const u8,
     data_len: usize,
 ) -> DiErrorCode {
-    // Validate container
-    if container.is_null() {
-        set_last_error("Container pointer is null");
-        return DiErrorCode::InvalidArgument;
-    }
-
-    // Validate type_name
-    if type_name.is_null() {
-        set_last_error("Type name is null");
-        return DiErrorCode::InvalidArgument;
-    }
-
-    // SAFETY: Caller guarantees type_name is valid
-    let type_name_str = if let Ok(s) = unsafe { CStr::from_ptr(type_name) }.to_str() {
-        s.to_string()
-    } else {
-        set_last_error("Type name is not valid UTF-8");
-        return DiErrorCode::InvalidArgument;
-    };
-
-    // Validate data
-    if data.is_null() && data_len > 0 {
-        set_last_error("Data pointer is null but length is non-zero");
-        return DiErrorCode::InvalidArgument;
-    }
-
-    // Copy the data
-    let data_vec = if data_len > 0 {
-        // SAFETY: Caller guarantees data points to data_len bytes
-        unsafe { std::slice::from_raw_parts(data, data_len) }.to_vec()
-    } else {
-        Vec::new()
-    };
-
-    // SAFETY: Caller guarantees container is valid
-    let container = unsafe { &*container };
-
-    // Check and insert atomically under a single write lock so two threads
-    // cannot both pass the existence check and silently overwrite each other.
-    let mut services = container.services.write().unwrap();
-    match services.entry(type_name_str) {
-        Entry::Occupied(entry) => {
-            set_last_error(format!("Service '{}' is already registered", entry.key()));
-            DiErrorCode::AlreadyRegistered
+    ffi_guard(DiErrorCode::InternalError, || {
+        // Validate container
+        if container.is_null() {
+            set_last_error("Container pointer is null");
+            return DiErrorCode::InvalidArgument;
         }
-        Entry::Vacant(entry) => {
-            let service_data: Arc<dyn Any + Send + Sync> = Arc::new(data_vec);
-            entry.insert(service_data);
-            DiErrorCode::Ok
+
+        // Validate type_name
+        if type_name.is_null() {
+            set_last_error("Type name is null");
+            return DiErrorCode::InvalidArgument;
         }
-    }
+
+        // SAFETY: Caller guarantees type_name is valid
+        let type_name_str = if let Ok(s) = unsafe { CStr::from_ptr(type_name) }.to_str() {
+            s.to_string()
+        } else {
+            set_last_error("Type name is not valid UTF-8");
+            return DiErrorCode::InvalidArgument;
+        };
+
+        // Validate data
+        if data.is_null() && data_len > 0 {
+            set_last_error("Data pointer is null but length is non-zero");
+            return DiErrorCode::InvalidArgument;
+        }
+
+        // Copy the data
+        let data_vec = if data_len > 0 {
+            // SAFETY: Caller guarantees data points to data_len bytes
+            unsafe { std::slice::from_raw_parts(data, data_len) }.to_vec()
+        } else {
+            Vec::new()
+        };
+
+        // SAFETY: Caller guarantees container is valid
+        let container = unsafe { &*container };
+
+        // Match core semantics: locking blocks registration only.
+        if container.locked.load(Ordering::Acquire) {
+            set_last_error("Container is locked - cannot register new services");
+            return DiErrorCode::Locked;
+        }
+
+        // Check and insert atomically under a single write lock so two threads
+        // cannot both pass the existence check and silently overwrite each other.
+        let mut services = container.services.write().unwrap();
+        match services.entry(type_name_str) {
+            Entry::Occupied(entry) => {
+                set_last_error(format!("Service '{}' is already registered", entry.key()));
+                DiErrorCode::AlreadyRegistered
+            }
+            Entry::Vacant(entry) => {
+                let service_data: Arc<dyn Any + Send + Sync> = Arc::new(data_vec);
+                entry.insert(service_data);
+                DiErrorCode::Ok
+            }
+        }
+    })
 }
 
 /// Register a singleton service with a JSON string.
@@ -234,7 +305,8 @@ pub unsafe extern "C" fn di_register_singleton(
 /// - `json_data` - JSON-serialized service data (null-terminated)
 ///
 /// # Returns
-/// Error code indicating success or failure.
+/// Error code indicating success or failure. Returns `Locked` if the
+/// container has been locked with `di_lock()`.
 ///
 /// # Safety
 /// - `container` must be a valid pointer to a `DiContainer` returned from `di_container_create`
@@ -246,24 +318,154 @@ pub unsafe extern "C" fn di_register_singleton_json(
     type_name: *const c_char,
     json_data: *const c_char,
 ) -> DiErrorCode {
-    if json_data.is_null() {
-        set_last_error("JSON data is null");
-        return DiErrorCode::InvalidArgument;
-    }
-
-    // SAFETY: Caller guarantees json_data is valid
-    let json_str = match unsafe { CStr::from_ptr(json_data) }.to_str() {
-        Ok(s) => s,
-        Err(_) => {
-            set_last_error("JSON data is not valid UTF-8");
+    ffi_guard(DiErrorCode::InternalError, || {
+        if json_data.is_null() {
+            set_last_error("JSON data is null");
             return DiErrorCode::InvalidArgument;
         }
-    };
 
-    let json_bytes = json_str.as_bytes();
+        // SAFETY: Caller guarantees json_data is valid
+        let json_str = match unsafe { CStr::from_ptr(json_data) }.to_str() {
+            Ok(s) => s,
+            Err(_) => {
+                set_last_error("JSON data is not valid UTF-8");
+                return DiErrorCode::InvalidArgument;
+            }
+        };
 
-    // SAFETY: We just validated all pointers
-    unsafe { di_register_singleton(container, type_name, json_bytes.as_ptr(), json_bytes.len()) }
+        let json_bytes = json_str.as_bytes();
+
+        // SAFETY: We just validated all pointers
+        unsafe {
+            di_register_singleton(container, type_name, json_bytes.as_ptr(), json_bytes.len())
+        }
+    })
+}
+
+// ============================================================================
+// Service Removal and Locking
+// ============================================================================
+
+/// Remove a registered service by type name.
+///
+/// Matching the core container's semantics, removal is permitted on a locked
+/// container: locking prevents new registrations only.
+///
+/// # Returns
+/// `Ok` if the service was removed, `NotFound` if no service with that name
+/// is registered (with the last error set), or `InvalidArgument` for a null
+/// container, null type name, or a type name that is not valid UTF-8.
+///
+/// # Safety
+/// - `container` must be a valid pointer to a `DiContainer`
+/// - `type_name` must be a valid null-terminated C string
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn di_remove(
+    container: *mut DiContainer,
+    type_name: *const c_char,
+) -> DiErrorCode {
+    ffi_guard(DiErrorCode::InternalError, || {
+        // Validate container
+        if container.is_null() {
+            set_last_error("Container pointer is null");
+            return DiErrorCode::InvalidArgument;
+        }
+
+        // Validate type_name
+        if type_name.is_null() {
+            set_last_error("Type name is null");
+            return DiErrorCode::InvalidArgument;
+        }
+
+        // SAFETY: Caller guarantees type_name is valid
+        let type_name_str = match unsafe { CStr::from_ptr(type_name) }.to_str() {
+            Ok(s) => s,
+            Err(_) => {
+                set_last_error("Type name is not valid UTF-8");
+                return DiErrorCode::InvalidArgument;
+            }
+        };
+
+        // SAFETY: Caller guarantees container is valid
+        let container = unsafe { &*container };
+
+        let removed = container.services.write().unwrap().remove(type_name_str);
+        if removed.is_some() {
+            DiErrorCode::Ok
+        } else {
+            set_last_error(format!("Service '{type_name_str}' not found"));
+            DiErrorCode::NotFound
+        }
+    })
+}
+
+/// Remove all registered services from a container.
+///
+/// Matching the core container's semantics, clearing is permitted on a locked
+/// container: locking prevents new registrations only.
+///
+/// # Returns
+/// `Ok` on success, or `InvalidArgument` if the container is null.
+///
+/// # Safety
+/// - `container` must be a valid pointer to a `DiContainer`
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn di_clear(container: *mut DiContainer) -> DiErrorCode {
+    ffi_guard(DiErrorCode::InternalError, || {
+        if container.is_null() {
+            set_last_error("Container pointer is null");
+            return DiErrorCode::InvalidArgument;
+        }
+
+        // SAFETY: Caller guarantees container is valid
+        let container = unsafe { &*container };
+        container.services.write().unwrap().clear();
+        DiErrorCode::Ok
+    })
+}
+
+/// Lock a container to prevent further registrations.
+///
+/// Once locked, `di_register_singleton()` and `di_register_singleton_json()`
+/// return `Locked`. Removal (`di_remove()`) and clearing (`di_clear()`)
+/// remain permitted, matching the core container's semantics. There is no
+/// unlock. Child scopes created with `di_container_scope()` start unlocked.
+///
+/// A null container is recorded as an error (see `di_error_message()`) and
+/// otherwise ignored.
+///
+/// # Safety
+/// - `container` must be a valid pointer to a `DiContainer`
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn di_lock(container: *mut DiContainer) {
+    ffi_guard((), || {
+        if container.is_null() {
+            set_last_error("Container pointer is null");
+            return;
+        }
+
+        // SAFETY: Caller guarantees container is valid
+        unsafe { &*container }.locked.store(true, Ordering::Release);
+    });
+}
+
+/// Check whether a container is locked.
+///
+/// # Returns
+/// 1 if the container is locked, 0 if it is not, -1 on error.
+///
+/// # Safety
+/// - `container` must be a valid pointer to a `DiContainer`
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn di_is_locked(container: *const DiContainer) -> i32 {
+    ffi_guard(-1, || {
+        if container.is_null() {
+            return -1;
+        }
+
+        // SAFETY: Caller guarantees container is valid
+        i32::from(unsafe { &*container }.locked.load(Ordering::Acquire))
+    })
 }
 
 // ============================================================================
@@ -288,69 +490,75 @@ pub unsafe extern "C" fn di_resolve(
     container: *mut DiContainer,
     type_name: *const c_char,
 ) -> DiResult {
-    // Validate container
-    if container.is_null() {
-        set_last_error("Container pointer is null");
-        return DiResult {
-            code: DiErrorCode::InvalidArgument,
-            service: ptr::null_mut(),
-        };
-    }
-
-    // Validate type_name
-    if type_name.is_null() {
-        set_last_error("Type name is null");
-        return DiResult {
-            code: DiErrorCode::InvalidArgument,
-            service: ptr::null_mut(),
-        };
-    }
-
-    // SAFETY: Caller guarantees type_name is valid
-    let type_name_str = match unsafe { CStr::from_ptr(type_name) }.to_str() {
-        Ok(s) => s.to_string(),
-        Err(_) => {
-            set_last_error("Type name is not valid UTF-8");
+    let internal_error = DiResult {
+        code: DiErrorCode::InternalError,
+        service: ptr::null_mut(),
+    };
+    ffi_guard(internal_error, || {
+        // Validate container
+        if container.is_null() {
+            set_last_error("Container pointer is null");
             return DiResult {
                 code: DiErrorCode::InvalidArgument,
                 service: ptr::null_mut(),
             };
         }
-    };
 
-    // SAFETY: Caller guarantees container is valid
-    let container = unsafe { &*container };
+        // Validate type_name
+        if type_name.is_null() {
+            set_last_error("Type name is null");
+            return DiResult {
+                code: DiErrorCode::InvalidArgument,
+                service: ptr::null_mut(),
+            };
+        }
 
-    // Look up the service
-    let services = container.services.read().unwrap();
-    match services.get(&type_name_str) {
-        Some(service_arc) => {
-            // Downcast to Vec<u8>
-            if let Some(data) = service_arc.downcast_ref::<Vec<u8>>() {
-                let service = Box::new(DiService {
-                    type_name: type_name_str,
-                    data: data.clone(),
-                });
-                DiResult {
-                    code: DiErrorCode::Ok,
-                    service: Box::into_raw(service),
+        // SAFETY: Caller guarantees type_name is valid
+        let type_name_str = match unsafe { CStr::from_ptr(type_name) }.to_str() {
+            Ok(s) => s.to_string(),
+            Err(_) => {
+                set_last_error("Type name is not valid UTF-8");
+                return DiResult {
+                    code: DiErrorCode::InvalidArgument,
+                    service: ptr::null_mut(),
+                };
+            }
+        };
+
+        // SAFETY: Caller guarantees container is valid
+        let container = unsafe { &*container };
+
+        // Look up the service
+        let services = container.services.read().unwrap();
+        match services.get(&type_name_str) {
+            Some(service_arc) => {
+                // Downcast to Vec<u8>
+                if let Some(data) = service_arc.downcast_ref::<Vec<u8>>() {
+                    let service = Box::new(DiService {
+                        type_name: type_name_str,
+                        data: data.clone(),
+                    });
+                    DiResult {
+                        code: DiErrorCode::Ok,
+                        service: Box::into_raw(service),
+                    }
+                } else {
+                    set_last_error("Internal error: service data type mismatch");
+                    DiResult {
+                        code: DiErrorCode::InternalError,
+                        service: ptr::null_mut(),
+                    }
                 }
-            } else {
-                set_last_error("Internal error: service data type mismatch");
+            }
+            None => {
+                set_last_error(format!("Service '{}' not found", type_name_str));
                 DiResult {
-                    code: DiErrorCode::InternalError,
+                    code: DiErrorCode::NotFound,
                     service: ptr::null_mut(),
                 }
             }
         }
-        None => {
-            set_last_error(format!("Service '{}' not found", type_name_str));
-            DiResult {
-                code: DiErrorCode::NotFound,
-                service: ptr::null_mut(),
-            }
-        }
-    }
+    })
 }
 
 /// Resolve a service and return its data as a JSON string.
@@ -375,60 +583,62 @@ pub unsafe extern "C" fn di_resolve_json(
     container: *mut DiContainer,
     type_name: *const c_char,
 ) -> *mut c_char {
-    // Validate container
-    if container.is_null() {
-        set_last_error("Container pointer is null");
-        return ptr::null_mut();
-    }
-
-    // Validate type_name
-    if type_name.is_null() {
-        set_last_error("Type name is null");
-        return ptr::null_mut();
-    }
-
-    // SAFETY: Caller guarantees type_name is valid
-    let type_name_str = match unsafe { CStr::from_ptr(type_name) }.to_str() {
-        Ok(s) => s.to_string(),
-        Err(_) => {
-            set_last_error("Type name is not valid UTF-8");
+    ffi_guard(ptr::null_mut(), || {
+        // Validate container
+        if container.is_null() {
+            set_last_error("Container pointer is null");
             return ptr::null_mut();
         }
-    };
 
-    // SAFETY: Caller guarantees container is valid
-    let container = unsafe { &*container };
+        // Validate type_name
+        if type_name.is_null() {
+            set_last_error("Type name is null");
+            return ptr::null_mut();
+        }
 
-    // Look up the service
-    let services = container.services.read().unwrap();
-    match services.get(&type_name_str) {
-        Some(service_arc) => {
-            // Downcast to Vec<u8>
-            if let Some(data) = service_arc.downcast_ref::<Vec<u8>>() {
-                // Convert bytes to string (assuming UTF-8 JSON)
-                match std::str::from_utf8(data) {
-                    Ok(json_str) => match CString::new(json_str) {
-                        Ok(cstr) => cstr.into_raw(),
+        // SAFETY: Caller guarantees type_name is valid
+        let type_name_str = match unsafe { CStr::from_ptr(type_name) }.to_str() {
+            Ok(s) => s.to_string(),
+            Err(_) => {
+                set_last_error("Type name is not valid UTF-8");
+                return ptr::null_mut();
+            }
+        };
+
+        // SAFETY: Caller guarantees container is valid
+        let container = unsafe { &*container };
+
+        // Look up the service
+        let services = container.services.read().unwrap();
+        match services.get(&type_name_str) {
+            Some(service_arc) => {
+                // Downcast to Vec<u8>
+                if let Some(data) = service_arc.downcast_ref::<Vec<u8>>() {
+                    // Convert bytes to string (assuming UTF-8 JSON)
+                    match std::str::from_utf8(data) {
+                        Ok(json_str) => match CString::new(json_str) {
+                            Ok(cstr) => cstr.into_raw(),
+                            Err(_) => {
+                                set_last_error("JSON string contains null bytes");
+                                ptr::null_mut()
+                            }
+                        },
                         Err(_) => {
-                            set_last_error("JSON string contains null bytes");
+                            set_last_error("Service data is not valid UTF-8");
                             ptr::null_mut()
                         }
-                    },
-                    Err(_) => {
-                        set_last_error("Service data is not valid UTF-8");
-                        ptr::null_mut()
                     }
+                } else {
+                    set_last_error("Internal error: service data type mismatch");
+                    ptr::null_mut()
                 }
-            } else {
-                set_last_error("Internal error: service data type mismatch");
+            }
+            None => {
+                set_last_error(format!("Service '{}' not found", type_name_str));
                 ptr::null_mut()
             }
         }
-        None => {
-            set_last_error(format!("Service '{}' not found", type_name_str));
-            ptr::null_mut()
-        }
-    }
+    })
 }
 
 /// Check if a service is registered.
@@ -441,25 +651,27 @@ pub unsafe extern "C" fn di_resolve_json(
 /// - `type_name` must be a valid null-terminated C string
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn di_contains(container: *mut DiContainer, type_name: *const c_char) -> i32 {
-    if container.is_null() || type_name.is_null() {
-        return -1;
-    }
+    ffi_guard(-1, || {
+        if container.is_null() || type_name.is_null() {
+            return -1;
+        }
 
-    // SAFETY: Caller guarantees type_name is valid
-    let type_name_str = match unsafe { CStr::from_ptr(type_name) }.to_str() {
-        Ok(s) => s,
-        Err(_) => return -1,
-    };
+        // SAFETY: Caller guarantees type_name is valid
+        let type_name_str = match unsafe { CStr::from_ptr(type_name) }.to_str() {
+            Ok(s) => s,
+            Err(_) => return -1,
+        };
 
-    // SAFETY: Caller guarantees container is valid
-    let container = unsafe { &*container };
-    let services = container.services.read().unwrap();
+        // SAFETY: Caller guarantees container is valid
+        let container = unsafe { &*container };
+        let services = container.services.read().unwrap();
 
-    if services.contains_key(type_name_str) {
-        1
-    } else {
-        0
-    }
+        if services.contains_key(type_name_str) {
+            1
+        } else {
+            0
+        }
+    })
 }
 
 // ============================================================================
@@ -476,11 +688,13 @@ pub unsafe extern "C" fn di_contains(container: *mut DiContainer, type_name: *co
 /// - `service` must be a valid pointer to a `DiService` returned from `di_resolve`
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn di_service_data(service: *const DiService) -> *const u8 {
-    if service.is_null() {
-        return ptr::null();
-    }
-    // SAFETY: Caller guarantees service is valid
-    unsafe { &*service }.data.as_ptr()
+    ffi_guard(ptr::null(), || {
+        if service.is_null() {
+            return ptr::null();
+        }
+        // SAFETY: Caller guarantees service is valid
+        unsafe { &*service }.data.as_ptr()
+    })
 }
 
 /// Get the data length from a service handle.
@@ -492,11 +706,13 @@ pub unsafe extern "C" fn di_service_data(service: *const DiService) -> *const u8
 /// - `service` must be a valid pointer to a `DiService` returned from `di_resolve`
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn di_service_data_len(service: *const DiService) -> usize {
-    if service.is_null() {
-        return 0;
-    }
-    // SAFETY: Caller guarantees service is valid
-    unsafe { &*service }.data.len()
+    ffi_guard(0, || {
+        if service.is_null() {
+            return 0;
+        }
+        // SAFETY: Caller guarantees service is valid
+        unsafe { &*service }.data.len()
+    })
 }
 
 /// Get the type name from a service handle.
@@ -510,17 +726,19 @@ pub unsafe extern "C" fn di_service_data_len(service: *const DiService) -> usize
 /// - `service` must be a valid pointer to a `DiService` returned from `di_resolve`
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn di_service_type_name(service: *const DiService) -> *const c_char {
-    if service.is_null() {
-        return ptr::null();
-    }
-    // SAFETY: Caller guarantees service is valid
-    let service = unsafe { &*service };
+    ffi_guard(ptr::null(), || {
+        if service.is_null() {
+            return ptr::null();
+        }
+        // SAFETY: Caller guarantees service is valid
+        let service = unsafe { &*service };
 
-    // Create a CString and leak it - caller must free with di_string_free
-    match CString::new(service.type_name.clone()) {
-        Ok(cstr) => cstr.into_raw(),
-        Err(_) => ptr::null(),
-    }
+        // Create a CString and leak it - caller must free with di_string_free
+        match CString::new(service.type_name.clone()) {
+            Ok(cstr) => cstr.into_raw(),
+            Err(_) => ptr::null(),
+        }
+    })
 }
 
 /// Free a service handle.
@@ -530,10 +748,12 @@ pub unsafe extern "C" fn di_service_type_name(service: *const DiService) -> *con
 /// - After calling this function, the pointer is invalid
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn di_service_free(service: *mut DiService) {
-    if !service.is_null() {
-        // SAFETY: Caller guarantees service is valid
-        drop(unsafe { Box::from_raw(service) });
-    }
+    ffi_guard((), || {
+        if !service.is_null() {
+            // SAFETY: Caller guarantees service is valid
+            drop(unsafe { Box::from_raw(service) });
+        }
+    });
 }
 
 // ============================================================================
@@ -547,23 +767,27 @@ pub unsafe extern "C" fn di_service_free(service: *mut DiService) {
 /// The pointer must be freed with `di_string_free()`.
 #[unsafe(no_mangle)]
 pub extern "C" fn di_error_message() -> *mut c_char {
-    LAST_ERROR.with(|e| {
-        let error = e.borrow();
-        match &*error {
-            Some(msg) => match CString::new(msg.as_str()) {
-                Ok(cstr) => cstr.into_raw(),
-                Err(_) => ptr::null_mut(),
-            },
-            None => ptr::null_mut(),
-        }
+    ffi_guard(ptr::null_mut(), || {
+        LAST_ERROR.with(|e| {
+            let error = e.borrow();
+            match &*error {
+                Some(msg) => match CString::new(msg.as_str()) {
+                    Ok(cstr) => cstr.into_raw(),
+                    Err(_) => ptr::null_mut(),
+                },
+                None => ptr::null_mut(),
+            }
+        })
     })
 }
 
 /// Clear the last error message.
 #[unsafe(no_mangle)]
 pub extern "C" fn di_error_clear() {
-    LAST_ERROR.with(|e| {
-        *e.borrow_mut() = None;
+    ffi_guard((), || {
+        LAST_ERROR.with(|e| {
+            *e.borrow_mut() = None;
+        });
     });
 }
 
@@ -574,10 +798,12 @@ pub extern "C" fn di_error_clear() {
 /// - After calling this function, the pointer is invalid
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn di_string_free(s: *mut c_char) {
-    if !s.is_null() {
-        // SAFETY: Caller guarantees s was allocated by CString::into_raw
-        drop(unsafe { CString::from_raw(s) });
-    }
+    ffi_guard((), || {
+        if !s.is_null() {
+            // SAFETY: Caller guarantees s was allocated by CString::into_raw
+            drop(unsafe { CString::from_raw(s) });
+        }
+    });
 }
 
 // ============================================================================
@@ -591,8 +817,10 @@ pub unsafe extern "C" fn di_string_free(s: *mut c_char) {
 /// This string is statically allocated and must NOT be freed.
 #[unsafe(no_mangle)]
 pub extern "C" fn di_version() -> *const c_char {
-    static VERSION: &[u8] = concat!(env!("CARGO_PKG_VERSION"), "\0").as_bytes();
-    VERSION.as_ptr() as *const c_char
+    ffi_guard(ptr::null(), || {
+        static VERSION: &[u8] = concat!(env!("CARGO_PKG_VERSION"), "\0").as_bytes();
+        VERSION.as_ptr() as *const c_char
+    })
 }
 
 /// Get the number of registered services in a container.
@@ -604,12 +832,14 @@ pub extern "C" fn di_version() -> *const c_char {
 /// - `container` must be a valid pointer to a `DiContainer`
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn di_service_count(container: *const DiContainer) -> i64 {
-    if container.is_null() {
-        return -1;
-    }
-    // SAFETY: Caller guarantees container is valid
-    let container = unsafe { &*container };
-    container.services.read().unwrap().len() as i64
+    ffi_guard(-1, || {
+        if container.is_null() {
+            return -1;
+        }
+        // SAFETY: Caller guarantees container is valid
+        let container = unsafe { &*container };
+        container.services.read().unwrap().len() as i64
+    })
 }
 
 #[cfg(test)]
@@ -883,5 +1113,97 @@ mod tests {
             di_register_singleton(container, second.as_ptr(), data.as_ptr(), data.len());
             assert_eq!(di_service_count(container), 2);
         });
+    }
+
+    #[test]
+    fn test_remove_round_trip() {
+        with_container(|container| unsafe {
+            let type_name = CString::new("Removable").unwrap();
+            let data = b"data";
+
+            di_register_singleton(container, type_name.as_ptr(), data.as_ptr(), data.len());
+            assert_eq!(di_contains(container, type_name.as_ptr()), 1);
+
+            assert_eq!(di_remove(container, type_name.as_ptr()), DiErrorCode::Ok);
+            assert_eq!(di_contains(container, type_name.as_ptr()), 0);
+
+            // Removing again must report NotFound
+            assert_eq!(
+                di_remove(container, type_name.as_ptr()),
+                DiErrorCode::NotFound
+            );
+        });
+    }
+
+    #[test]
+    fn test_clear() {
+        with_container(|container| unsafe {
+            let first = CString::new("First").unwrap();
+            let second = CString::new("Second").unwrap();
+            let data = b"data";
+
+            di_register_singleton(container, first.as_ptr(), data.as_ptr(), data.len());
+            di_register_singleton(container, second.as_ptr(), data.as_ptr(), data.len());
+            assert_eq!(di_service_count(container), 2);
+
+            assert_eq!(di_clear(container), DiErrorCode::Ok);
+            assert_eq!(di_service_count(container), 0);
+        });
+    }
+
+    #[test]
+    fn test_lock_blocks_registration_but_allows_remove_and_clear() {
+        with_container(|container| unsafe {
+            let existing = CString::new("Existing").unwrap();
+            let blocked = CString::new("Blocked").unwrap();
+            let data = b"data";
+
+            di_register_singleton(container, existing.as_ptr(), data.as_ptr(), data.len());
+
+            di_lock(container);
+
+            let result =
+                di_register_singleton(container, blocked.as_ptr(), data.as_ptr(), data.len());
+            assert_eq!(result, DiErrorCode::Locked);
+
+            let json = CString::new("{}").unwrap();
+            let json_result =
+                di_register_singleton_json(container, blocked.as_ptr(), json.as_ptr());
+            assert_eq!(json_result, DiErrorCode::Locked);
+
+            // Locking blocks registration only; removal and clearing still work.
+            assert_eq!(di_remove(container, existing.as_ptr()), DiErrorCode::Ok);
+            assert_eq!(di_clear(container), DiErrorCode::Ok);
+        });
+    }
+
+    #[test]
+    fn test_is_locked_transitions() {
+        with_container(|container| unsafe {
+            assert_eq!(di_is_locked(container), 0);
+            di_lock(container);
+            assert_eq!(di_is_locked(container), 1);
+        });
+    }
+
+    #[test]
+    fn test_error_code_from_core_error() {
+        assert_eq!(
+            DiErrorCode::from(&DiError::not_found::<u32>()),
+            DiErrorCode::NotFound
+        );
+        assert_eq!(
+            DiErrorCode::from(&DiError::already_registered::<u32>()),
+            DiErrorCode::AlreadyRegistered
+        );
+        assert_eq!(DiErrorCode::from(&DiError::Locked), DiErrorCode::Locked);
+        assert_eq!(
+            DiErrorCode::from(&DiError::circular::<u32>()),
+            DiErrorCode::InternalError
+        );
+        assert_eq!(
+            DiErrorCode::from(&DiError::Internal(String::from("boom"))),
+            DiErrorCode::InternalError
+        );
     }
 }

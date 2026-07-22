@@ -743,6 +743,62 @@ impl Container {
         self.depth
     }
 
+    /// Format a human-readable summary of every registration visible to this
+    /// container, for logging when a resolution unexpectedly fails.
+    ///
+    /// The summary lists the scope depth, the number of services registered
+    /// in each scope of the parent chain, and the [`TypeId`] of every
+    /// registration. The container stores services by `TypeId` only (type
+    /// names are not retained), so pair this output with the `type_name`
+    /// carried by [`DiError::NotFound`] when diagnosing a failed resolve.
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use dependency_injector::Container;
+    ///
+    /// #[derive(Clone)]
+    /// struct MyService;
+    ///
+    /// let root = Container::new();
+    /// root.singleton(MyService);
+    ///
+    /// let scope = root.scope();
+    /// if scope.get::<String>().is_err() {
+    ///     eprintln!("{}", scope.debug_registrations());
+    /// }
+    /// ```
+    pub fn debug_registrations(&self) -> String {
+        use std::fmt::Write;
+
+        let mut out = format!("Container registrations (scope depth {}):\n", self.depth);
+        let mut total = 0usize;
+        let mut current = Some(&self.storage);
+        let mut depth = self.depth;
+        let mut is_local = true;
+
+        while let Some(storage) = current {
+            let type_ids = storage.type_ids();
+            total += type_ids.len();
+            let location = if is_local {
+                "current scope"
+            } else {
+                "ancestor"
+            };
+            let _ = writeln!(
+                out,
+                "  {location} (depth {depth}): {} registered: {type_ids:?}",
+                type_ids.len()
+            );
+            current = storage.parent();
+            depth = depth.saturating_sub(1);
+            is_local = false;
+        }
+
+        let _ = write!(out, "  total: {total} service(s) in scope chain");
+        out
+    }
+
     // =========================================================================
     // Lifecycle Methods
     // =========================================================================
@@ -1455,6 +1511,69 @@ mod tests {
         let container = Container::new();
         let result = container.get::<TestService>();
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_not_found_message_names_type_and_hints_at_diagnostics() {
+        let container = Container::new();
+
+        // Root fast path (get_and_cache)
+        let message = container.get::<TestService>().err().unwrap().to_string();
+        assert!(message.contains("TestService"));
+        assert!(message.contains("different scope"));
+        assert!(message.contains("Container::debug_registrations()"));
+
+        // Parent-chain path (resolve_from_parents) produces the same message
+        let scope = container.scope();
+        let scoped_message = scope.get::<TestService>().err().unwrap().to_string();
+        assert_eq!(message, scoped_message);
+    }
+
+    #[test]
+    fn test_debug_registrations_reflects_count_and_depth() {
+        let root = Container::new();
+        root.singleton(TestService {
+            value: "root".into(),
+        });
+
+        let child = root.scope();
+        child.singleton(AnotherService {
+            name: "child".into(),
+        });
+
+        let summary = child.debug_registrations();
+        assert!(summary.contains("scope depth 1"));
+        assert!(summary.contains("current scope (depth 1): 1 registered"));
+        assert!(summary.contains("ancestor (depth 0): 1 registered"));
+        assert!(summary.contains("total: 2 service(s) in scope chain"));
+
+        // The root's summary only covers its own scope
+        let root_summary = root.debug_registrations();
+        assert!(root_summary.contains("scope depth 0"));
+        assert!(root_summary.contains("current scope (depth 0): 1 registered"));
+        assert!(!root_summary.contains("ancestor"));
+        assert!(root_summary.contains("total: 1 service(s) in scope chain"));
+    }
+
+    #[test]
+    fn test_debug_registrations_empty_container() {
+        let container = Container::new();
+        let summary = container.debug_registrations();
+        assert!(summary.contains("current scope (depth 0): 0 registered"));
+        assert!(summary.contains("total: 0 service(s) in scope chain"));
+    }
+
+    #[test]
+    fn test_debug_registrations_lists_type_ids() {
+        let container = Container::new();
+        container.singleton(TestService {
+            value: "listed".into(),
+        });
+
+        // The TypeId debug representation of the registered service appears
+        let expected = format!("{:?}", TypeId::of::<TestService>());
+        let summary = container.debug_registrations();
+        assert!(summary.contains(&expected));
     }
 
     #[test]

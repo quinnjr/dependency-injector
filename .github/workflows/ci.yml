@@ -15,6 +15,7 @@ jobs:
   check:
     name: Check
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v6
 
@@ -38,6 +39,7 @@ jobs:
   fmt:
     name: Format
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v6
 
@@ -52,6 +54,7 @@ jobs:
   clippy:
     name: Clippy
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v6
 
@@ -77,6 +80,7 @@ jobs:
   test:
     name: Test (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
     strategy:
       fail-fast: false
       matrix:
@@ -104,6 +108,7 @@ jobs:
   test-features:
     name: Test Feature Combinations
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v6
 
@@ -136,6 +141,7 @@ jobs:
   doc:
     name: Documentation
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v6
 
@@ -161,6 +167,7 @@ jobs:
   msrv:
     name: Minimum Supported Rust Version
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v6
 
@@ -184,6 +191,7 @@ jobs:
   coverage:
     name: Code Coverage
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v6
 
@@ -207,6 +215,7 @@ jobs:
   fuzz:
     name: Fuzz (smoke)
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v6
 
@@ -223,8 +232,12 @@ jobs:
             ~/.cargo/registry
             ~/.cargo/git
             fuzz/target
-          key: ${{ runner.os }}-cargo-fuzz-${{ hashFiles('**/Cargo.lock') }}
+            fuzz/corpus
+          # The corpus grows every run, so the key includes the run id to force
+          # a fresh save; restore-keys fall back to the newest previous cache.
+          key: ${{ runner.os }}-cargo-fuzz-${{ hashFiles('**/Cargo.lock') }}-${{ github.run_id }}
           restore-keys: |
+            ${{ runner.os }}-cargo-fuzz-${{ hashFiles('**/Cargo.lock') }}-
             ${{ runner.os }}-cargo-fuzz-
 
       - name: Run fuzz targets (30s each)
@@ -232,3 +245,142 @@ jobs:
           for target in fuzz_container fuzz_scoped fuzz_concurrent fuzz_lifecycle; do
             cargo +nightly fuzz run "$target" -- -max_total_time=30 -timeout=10
           done
+
+  bindings-test:
+    name: Bindings Test
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo registry
+        uses: actions/cache@v5
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-bindings-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-bindings-
+
+      - name: Build FFI cdylib
+        run: cargo rustc --release --features ffi --crate-type cdylib
+
+      - name: Test Go bindings
+        env:
+          # The cgo directives in ffi/go/di/di.go already resolve
+          # -L${SRCDIR}/../../../target/release at compile time; CGO_LDFLAGS is
+          # belt-and-braces, LD_LIBRARY_PATH is required at test runtime.
+          CGO_LDFLAGS: -L${{ github.workspace }}/target/release
+          LD_LIBRARY_PATH: ${{ github.workspace }}/target/release
+        run: cd ffi/go/di && go test ./...
+
+      - name: Setup Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+
+      - name: Test Python bindings
+        env:
+          # The ctypes loader checks DI_LIBRARY_PATH (a file path) first, so
+          # this is the mechanism it directly supports. `pip install -e .` is a
+          # plain setuptools editable install and never runs download_native.py.
+          DI_LIBRARY_PATH: ${{ github.workspace }}/target/release/libdependency_injector.so
+        run: |
+          pip install pytest
+          cd ffi/python
+          pip install -e .
+          pytest tests/ -v
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: '22'
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v6
+        with:
+          version: 10
+
+      - name: Test Node.js bindings
+        env:
+          # findLibraryPath checks DI_LIBRARY_PATH (a file path) first;
+          # --ignore-scripts skips the postinstall native downloader.
+          DI_LIBRARY_PATH: ${{ github.workspace }}/target/release/libdependency_injector.so
+        run: |
+          cd ffi/nodejs
+          pnpm install --ignore-scripts
+          pnpm test
+
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v6
+        with:
+          dotnet-version: '8.0.x'
+
+      - name: Test C# bindings
+        env:
+          # NativeLibraryResolver checks DI_LIBRARY_PATH (a file path) before
+          # its runtimes/ layout and dev-path fallbacks.
+          DI_LIBRARY_PATH: ${{ github.workspace }}/target/release/libdependency_injector.so
+        run: cd ffi/csharp && dotnet test DependencyInjector.Tests
+
+  docs-build:
+    name: Docs Build
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: '22'
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v6
+        with:
+          version: 10
+
+      - name: Get pnpm store directory
+        shell: bash
+        run: |
+          echo "STORE_PATH=$(pnpm store path --silent)" >> $GITHUB_ENV
+
+      - name: Cache pnpm dependencies
+        uses: actions/cache@v5
+        with:
+          path: ${{ env.STORE_PATH }}
+          key: ${{ runner.os }}-pnpm-store-${{ hashFiles('docs/pnpm-lock.yaml') }}
+          restore-keys: |
+            ${{ runner.os }}-pnpm-store-
+
+      - name: Install dependencies
+        working-directory: docs
+        run: pnpm install --frozen-lockfile
+
+      - name: Build docs
+        working-directory: docs
+        run: pnpm run build
+
+  miri:
+    name: Miri
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    # informative for now — tighten to gating once the unsafe surface is miri-clean
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@nightly
+        with:
+          components: miri
+
+      - name: Run miri
+        env:
+          MIRIFLAGS: -Zmiri-disable-isolation
+        run: cargo +nightly miri test --lib

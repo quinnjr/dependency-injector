@@ -1,0 +1,56 @@
+name: Nightly Fuzz
+
+on:
+  schedule:
+    # Run every day at 04:00 UTC
+    - cron: '0 4 * * *'
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+
+permissions:
+  contents: read
+
+jobs:
+  fuzz:
+    name: Fuzz Targets
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@nightly
+
+      - name: Install cargo-fuzz
+        uses: taiki-e/install-action@cargo-fuzz
+
+      - name: Cache fuzz build and corpus
+        uses: actions/cache@v5
+        with:
+          path: |
+            fuzz/target
+            fuzz/corpus
+          # Include the run id so the growing corpus is saved on every run;
+          # restore-keys picks up the most recent previous run.
+          key: ${{ runner.os }}-fuzz-${{ hashFiles('fuzz/Cargo.lock') }}-${{ github.run_id }}
+          restore-keys: |
+            ${{ runner.os }}-fuzz-${{ hashFiles('fuzz/Cargo.lock') }}-
+            ${{ runner.os }}-fuzz-
+
+      - name: Run fuzz targets
+        run: |
+          for target in fuzz_container fuzz_scoped fuzz_concurrent fuzz_lifecycle; do
+            echo "::group::${target}"
+            cargo fuzz run "$target" -- -max_total_time=300 -timeout=10
+            echo "::endgroup::"
+          done
+
+      - name: Upload crash artifacts
+        if: failure()
+        uses: actions/upload-artifact@v7
+        with:
+          name: fuzz-artifacts
+          path: fuzz/artifacts
+          if-no-files-found: ignore

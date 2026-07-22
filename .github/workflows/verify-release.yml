@@ -1,0 +1,111 @@
+name: Verify Release
+
+on:
+  workflow_run:
+    workflows: ["Release"]
+    types: [completed]
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version to verify (e.g., 2.0.0, without the v prefix)'
+        required: true
+
+permissions:
+  contents: read
+
+jobs:
+  resolve:
+    name: Resolve Version
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    if: github.event_name == 'workflow_dispatch' || github.event.workflow_run.conclusion == 'success'
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+    steps:
+      - name: Determine version
+        id: version
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            VERSION="${{ github.event.inputs.version }}"
+          else
+            # The Release workflow runs on tag pushes, so head_branch holds
+            # the tag name (e.g. v2.0.0).
+            VERSION="${{ github.event.workflow_run.head_branch }}"
+          fi
+          VERSION="${VERSION#v}"
+          if [ -z "$VERSION" ]; then
+            echo "::error::Could not determine the release version"
+            exit 1
+          fi
+          echo "Verifying release v${VERSION}"
+          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
+
+  crate-verify:
+    name: Verify crates.io Install
+    needs: resolve
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Build scratch project against published crate
+        run: |
+          VERSION="${{ needs.resolve.outputs.version }}"
+          cargo new verify-install
+          cd verify-install
+
+          # Retry to allow for crates.io index propagation after publish
+          for attempt in 1 2 3 4 5; do
+            if cargo add "dependency-injector@${VERSION}"; then
+              break
+            fi
+            if [ "$attempt" = "5" ]; then
+              echo "::error::dependency-injector v${VERSION} not found on crates.io after 5 attempts"
+              exit 1
+            fi
+            echo "Attempt ${attempt} failed, waiting 60s for crates.io to index..."
+            sleep 60
+          done
+
+          cargo build
+
+  assets-verify:
+    name: Verify Release Assets
+    needs: resolve
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Check native assets on GitHub release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          VERSION="${{ needs.resolve.outputs.version }}"
+          EXPECTED="libdependency_injector-linux-x64.so libdependency_injector-linux-arm64.so libdependency_injector-darwin-x64.dylib libdependency_injector-darwin-arm64.dylib dependency_injector-win32-x64.dll"
+
+          # Retry: the Build Native Libraries workflow uploads assets in
+          # parallel with the Release workflow and may still be running.
+          for attempt in $(seq 1 10); do
+            ASSETS=$(gh release view "v${VERSION}" --json assets --jq '.assets[].name' || true)
+            MISSING=""
+            for asset in $EXPECTED; do
+              if ! echo "$ASSETS" | grep -qx "$asset"; then
+                MISSING="$MISSING $asset"
+              fi
+            done
+            if [ -z "$MISSING" ]; then
+              echo "All expected native assets are present on release v${VERSION}:"
+              echo "$ASSETS"
+              exit 0
+            fi
+            echo "Attempt ${attempt}: still missing:${MISSING}"
+            if [ "$attempt" -lt 10 ]; then
+              sleep 60
+            fi
+          done
+
+          echo "Release v${VERSION} assets found:"
+          echo "$ASSETS"
+          echo "::error::Missing expected native assets on release v${VERSION}:${MISSING}"
+          exit 1

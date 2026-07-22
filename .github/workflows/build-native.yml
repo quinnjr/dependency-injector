@@ -7,7 +7,7 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: 'Version tag (e.g., v0.2.2)'
+        description: 'Version tag (e.g., v2.0.0)'
         required: true
 
 permissions:
@@ -108,6 +108,11 @@ jobs:
             cp "$f" release/
           done
           ls -la release/
+
+      - name: Generate SHA256SUMS
+        run: |
+          (cd release && sha256sum * > SHA256SUMS)
+          cat release/SHA256SUMS
 
       - name: Get version
         id: version

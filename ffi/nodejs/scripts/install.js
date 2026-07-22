@@ -17,6 +17,7 @@ import fs from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import { createWriteStream } from 'fs';
+import { createHash } from 'node:crypto';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -104,9 +105,9 @@ async function downloadFile(url, dest) {
 }
 
 /**
- * Get the download URL for a release asset.
+ * Fetch release metadata (resolved tag + asset list) for a version.
  */
-async function getDownloadUrl(version, assetName) {
+async function getReleaseAssets(version) {
   const tag = version.startsWith('v') ? version : `v${version}`;
   const apiUrl = `https://api.github.com/repos/${REPO_OWNER}/${REPO_NAME}/releases/tags/${tag}`;
 
@@ -120,17 +121,88 @@ async function getDownloadUrl(version, assetName) {
     res.on('end', () => {
       try {
         const release = JSON.parse(data);
-        const asset = release.assets?.find(a => a.name === assetName);
-        if (asset) {
-          resolve(asset.browser_download_url);
-        } else {
-          reject(new Error(`Asset '${assetName}' not found in release ${tag}`));
-        }
+        resolve({ tag, assets: release.assets || [] });
       } catch (err) {
         reject(err);
       }
     });
   });
+}
+
+/**
+ * Download a URL body as text (used for the SHA256SUMS asset).
+ */
+async function fetchText(url) {
+  const res = await httpsGet(url);
+
+  return new Promise((resolve, reject) => {
+    let data = '';
+    res.setEncoding('utf8');
+    res.on('data', chunk => data += chunk);
+    res.on('end', () => resolve(data));
+    res.on('error', reject);
+  });
+}
+
+/**
+ * Parse sha256sum output ("<hex>  <filename>", or "<hex> *<filename>" in
+ * binary mode) and return the expected hash for assetName, or null if the
+ * file has no entry for it.
+ */
+function parseSha256Sums(text, assetName) {
+  for (const rawLine of text.split('\n')) {
+    const match = rawLine.trim().match(/^([0-9a-fA-F]{64})\s+\*?(.+)$/);
+    if (match && match[2] === assetName) {
+      return match[1].toLowerCase();
+    }
+  }
+  return null;
+}
+
+/**
+ * Verify the downloaded file against the release's SHA256SUMS asset.
+ *
+ * - Release has no SHA256SUMS asset (pre-checksum release): warn loudly and
+ *   continue.
+ * - SHA256SUMS exists but cannot be fetched, has no entry for the asset, or
+ *   the hash mismatches: delete the downloaded file and exit non-zero.
+ */
+async function verifyChecksum(assets, tag, assetName, filePath) {
+  const sumsAsset = assets.find(a => a.name === 'SHA256SUMS');
+
+  if (!sumsAsset) {
+    console.warn(`⚠️  WARNING: release ${tag} has no SHA256SUMS asset; skipping checksum verification (pre-checksum release).`);
+    return;
+  }
+
+  let sumsText;
+  try {
+    sumsText = await fetchText(sumsAsset.browser_download_url);
+  } catch (err) {
+    fs.unlinkSync(filePath);
+    console.error(`❌ Failed to download SHA256SUMS from release ${tag}: ${err.message}`);
+    console.error('   Deleted the downloaded library since it could not be verified.');
+    process.exit(1);
+  }
+
+  const expected = parseSha256Sums(sumsText, assetName);
+  if (!expected) {
+    fs.unlinkSync(filePath);
+    console.error(`❌ SHA256SUMS in release ${tag} has no entry for '${assetName}'. Deleted the downloaded library.`);
+    process.exit(1);
+  }
+
+  const actual = createHash('sha256').update(fs.readFileSync(filePath)).digest('hex');
+  if (actual !== expected) {
+    fs.unlinkSync(filePath);
+    console.error(`❌ Checksum mismatch for '${assetName}' (release ${tag}):`);
+    console.error(`   expected ${expected}`);
+    console.error(`   actual   ${actual}`);
+    console.error('   The downloaded library has been deleted. This may indicate a corrupted or tampered download.');
+    process.exit(1);
+  }
+
+  console.log(`✅ SHA256 checksum verified: ${actual}`);
 }
 
 /**
@@ -210,18 +282,25 @@ async function install() {
   fs.mkdirSync(outputDir, { recursive: true });
 
   // Download from GitHub releases
-  console.log(`📥 Downloading ${assetName} for ${platformKey}...`);
-
   try {
-    const downloadUrl = await getDownloadUrl(PACKAGE_VERSION, assetName);
-    console.log(`   URL: ${downloadUrl}`);
+    const { tag, assets } = await getReleaseAssets(PACKAGE_VERSION);
+    console.log(`📥 Downloading asset '${assetName}' from release tag '${tag}' for ${platformKey}...`);
 
-    await downloadFile(downloadUrl, outputPath);
+    const asset = assets.find(a => a.name === assetName);
+    if (!asset) {
+      throw new Error(`Asset '${assetName}' not found in release ${tag}`);
+    }
+    console.log(`   URL: ${asset.browser_download_url}`);
+
+    await downloadFile(asset.browser_download_url, outputPath);
 
     // Make executable on Unix
     if (process.platform !== 'win32') {
       fs.chmodSync(outputPath, 0o755);
     }
+
+    // Verify against the release's SHA256SUMS (exits on mismatch)
+    await verifyChecksum(assets, tag, assetName, outputPath);
 
     console.log(`✅ Downloaded to: ${outputPath}`);
   } catch (error) {

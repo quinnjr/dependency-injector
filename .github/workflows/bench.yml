@@ -10,15 +10,20 @@ on:
 env:
   CARGO_TERM_COLOR: always
 
-permissions:
-  contents: write
-  deployments: write
-  pull-requests: write
-
 jobs:
   benchmark:
     name: Performance Benchmarks
     runs-on: ubuntu-latest
+    timeout-minutes: 30
+    # This single job serves two paths, so it needs the union of both:
+    # - push/dispatch: github-action-benchmark auto-pushes results to gh-pages
+    #   (contents: write) and records deployments (deployments: write)
+    # - pull_request: the results comment needs pull-requests: write
+    # If these paths are ever split into separate jobs, split these permissions too.
+    permissions:
+      contents: write
+      deployments: write
+      pull-requests: write
     steps:
       - uses: actions/checkout@v6
 

@@ -26,4 +26,4 @@ Or using context manager:
 from .container import Container, DIError, ErrorCode, get_library_path
 
 __all__ = ["Container", "DIError", "ErrorCode", "get_library_path"]
-__version__ = "0.2.2"
+__version__ = "2.0.0"

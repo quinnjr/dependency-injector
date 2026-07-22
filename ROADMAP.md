@@ -1,0 +1,108 @@
+# Roadmap
+
+Larger initiatives identified by the 2026-07-22 suggestion audit. Each entry
+carries the evidence that motivated it and a design sketch. Items small enough
+to land directly were implemented in the same audit branch; these were not,
+because each needs a dedicated design/review cycle.
+
+## 1. Multi-lifetime support across the FFI (transient / lazy factories)
+
+**Evidence**: `ffi/dependency_injector.h` exposes only
+`di_register_singleton(_json)`, while the core's headline is
+singleton/lazy/transient (`src/container.rs`). Every binding (Python, Node,
+Go, C#) is capped at singletons.
+
+**Sketch**: a factory-callback ABI —
+`di_register_transient(container, name, factory_fn, user_data, destructor_fn)`
+where `factory_fn: extern "C" fn(user_data: *mut c_void) -> DiOwnedBytes`.
+Each binding marshals its native closures (ctypes `CFUNCTYPE`, koffi
+callbacks, cgo `//export` trampolines, C# delegates + `GCHandle`). Open
+questions: callback thread-safety contract (resolve can happen on any
+thread), reentrancy (factory calling back into the container), and lifetime
+of `user_data` (needs the destructor). Ship behind new ABI symbols only —
+no changes to existing exports.
+
+## 2. Back the FFI store with a shared core substrate
+
+**Evidence**: `src/ffi.rs` reimplements storage as
+`RwLock<HashMap<String, Arc<dyn Any>>>` with snapshot scopes, while
+`src/storage.rs` already solves live parent chains + generation-stamped
+invalidation. The 2.0.0 invalidation work never reached the FFI because the
+implementations are disjoint.
+
+**Sketch**: generalize `ServiceStorage` over its key
+(`ServiceStorage<K: Eq + Hash>`; `K = TypeId` core, `K = String` FFI), or
+extract the parent-chain + generation mechanics into a shared internal
+`ChainStore<K>`. FFI scopes become live instead of snapshots (a documented
+behavior change for bindings — release-note it). Lifetime parity stays in
+item 1; this item is storage semantics only.
+
+## 3. Converge the dependency-declaration traits (breaking → 3.0)
+
+**Evidence**: three encodings of "this service needs X": `typed::Require`
+(type-level, consumed by nothing at runtime), `typed::DeclaresDeps`
+(`&'static [&'static str]`), `verified::DependencyInfo` (`Vec<&'static str>`),
+emitted by three derives that each re-parse the same fields.
+
+**Sketch**: make `Service::Dependencies` canonical; provide the string views
+via blanket projections. Blanket `impl<T: Service> Require for T` conflicts
+with derived `Require` impls (coherence), so this is a breaking consolidation:
+deprecate `Require`/`DeclaresDeps` in 2.x, remove in 3.0.
+
+## 4. One scope concept (breaking → 3.0)
+
+**Evidence**: `Container::scope()`, `ScopedContainer` (pure delegation plus a
+`Scope` id), and `ScopePool` overlap; `ScopedContainer`/`ScopeBuilder` are
+exported but appear in no docs or examples.
+
+**Sketch**: fold the `Scope` id into `Container` (it already tracks `depth`),
+reduce `ScopedContainer` to a deprecated alias in 2.x, remove in 3.0. Keep
+`ScopePool` — pooling is the one genuinely distinct concept.
+
+## 5. Python distribution via maturin
+
+**Evidence**: `build-python-wheels.yml` builds a generic wheel with raw
+setuptools, hand-renames it to a platform tag with `sed`, and bundles the
+cdylib — while `download_native.py` still exists for the sdist path.
+
+**Sketch**: switch `ffi/python` to maturin (`bindings = "cffi"`-less pure
+`cdylib` bundling), which emits correctly-tagged manylinux/macos/windows
+wheels natively; retire the rename hack and reduce `download_native.py` to
+the sdist fallback only. NuGet's `runtimes/{rid}/native` layout in
+`ffi/csharp` is the model. Requires validating the wheel matrix end to end
+before switching PyPI publishing.
+
+## 6. Shared ABI conformance suite + binding codegen
+
+**Evidence**: four bindings hand-restate the C header (ctypes argtypes,
+koffi `lib.func`, P/Invoke, cgo) and each maintains a private test suite with
+no shared vectors — semantic drift between bindings is only caught by
+accident.
+
+**Sketch**: one `ffi/conformance/vectors.json` (sequences of
+register/resolve/scope/contains/remove ops with expected codes/values); each
+binding's test harness gains a replay runner. Phase two: generate the
+mechanical declaration blocks from `dependency_injector.h` (cbindgen
+round-trip or a small script).
+
+## 7. Release automation via release-plz
+
+**Evidence**: three parallel release implementations (deploy.sh's sed
+version bumps and `sleep 30` index waits, publish.sh's curl-and-grep
+version check, release.yml's bare `cargo publish`) plus two changelog
+generators (deploy.sh `awk`, release.yml `grep`). Both had bugs found in
+production this week (dry-run mutation; non-idempotent publish).
+
+**Sketch**: release-plz release-PR flow driving the existing tag-triggered
+workflows; git-cliff (built in) replaces both changelog generators; the
+local scripts retire. `RELEASING.md` documents the current canonical flow
+until this lands.
+
+## 8. Remaining hardening follow-ups
+
+- TSAN job (needs `-Z build-std`; miri landed first).
+- Seed a `fuzz_lifecycle` corpus (currently cold-starts every run).
+- Generate the six per-language `DiErrorCode` enums from the header
+  (the `From<DiError>` mapping landed; codegen is phase two).
+- Surface `Locked`/`CircularDependency` as first-class ABI codes in the
+  next ABI-extending release.

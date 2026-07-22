@@ -5,6 +5,45 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+- **Real async support**: `Container::lazy_async`, `get_async`, and
+  `try_get_async` (feature `async`) — async-initialized singletons backed by
+  `tokio::sync::OnceCell`, initialized exactly once under concurrency and
+  participating in scope/parent-chain resolution. The `async` feature
+  previously compiled tokio in but gated no API.
+- **New FFI verbs**: `di_remove`, `di_clear`, `di_lock`, `di_is_locked`, and
+  a new `DI_LOCKED = 6` error code (append-only ABI). Locking blocks
+  registration only, matching the core container's semantics.
+- **Panic safety across the FFI boundary**: every `extern "C"` entry point now
+  catches panics (poisoned locks included) and surfaces them via
+  `di_error_message` instead of unwinding into the host process (previously
+  undefined behavior).
+- `Container::debug_registrations()` — formats the scope chain's registration
+  counts and `TypeId`s for diagnosing `NotFound` errors, which now carry an
+  actionable hint.
+- Derive macros accept `#[inject]` and `#[dep]` as exact aliases across
+  `Inject`, `Service`, and `TypedRequire`.
+- New examples: `scopes.rs`, `typed_builder.rs`, `performance.rs`; the docs
+  site gained a Compile-Time Safety guide section.
+- Release integrity: native release assets now ship with a `SHA256SUMS`
+  file, and the Node/Python installers verify downloads against it.
+- Contributor tooling: `CONTRIBUTING.md`, `RELEASING.md`, `AGENTS.md`,
+  `ROADMAP.md`, a `justfile` for the full dev loop, and a Cargo workspace
+  (root + derive; fuzz stays standalone).
+- CI: binding test suites (Python/Node/Go/C#) now run on every push; docs
+  site builds on PRs; miri (informative), daily canary, nightly fuzz with
+  corpus persistence, release verification, idempotent crates.io publishing,
+  per-job timeouts, dependency audit + Dependabot coverage for all five
+  package ecosystems.
+
+### Changed
+- FFI binding package versions (npm, PyPI, NuGet) synced from 0.2.2 to the
+  crate's major version line.
+- `DiError::NotFound`'s display message now explains likely causes and points
+  at `debug_registrations()`.
+
 ## [2.0.0] - 2026-07-21
 
 ### Added

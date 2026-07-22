@@ -6,6 +6,10 @@
 //! - `#[derive(Service)]` - Generate `Service` trait impl for compile-time verified DI
 //! - `#[derive(TypedRequire)]` - Generate `Require` trait impl declaring type-level dependencies
 //!
+//! All three derives accept `#[inject]` and `#[dep]` (and their `(optional)`
+//! forms) as exact aliases for marking dependency fields. By convention,
+//! `Inject` uses `#[inject]` while `Service` and `TypedRequire` use `#[dep]`.
+//!
 //! # Inject Example
 //!
 //! ```rust,ignore
@@ -74,6 +78,11 @@ use syn::{Attribute, Data, DeriveInput, Fields, Type, parse_macro_input};
 /// - `#[inject]` - Mark a field for injection. The field type must be `Arc<T>`.
 /// - `#[inject(optional)]` - Mark a field as optional injection. Uses `Option<Arc<T>>`.
 ///
+/// `#[dep]` and `#[dep(optional)]` are accepted as exact aliases of
+/// `#[inject]` and `#[inject(optional)]` respectively, so the same field
+/// annotations work across every derive in this crate. `#[inject]` is the
+/// conventional spelling for this macro.
+///
 /// # Generated Methods
 ///
 /// - `from_container(container: &Container) -> Result<Self, DiError>` - Creates an instance
@@ -92,7 +101,7 @@ use syn::{Attribute, Data, DeriveInput, Fields, Type, parse_macro_input};
 ///     counter: u64,
 /// }
 /// ```
-#[proc_macro_derive(Inject, attributes(inject))]
+#[proc_macro_derive(Inject, attributes(inject, dep))]
 pub fn derive_inject(input: TokenStream) -> TokenStream {
     let input = parse_macro_input!(input as DeriveInput);
 
@@ -123,14 +132,14 @@ pub fn derive_inject(input: TokenStream) -> TokenStream {
     // Parse fields and generate initialization code
     let mut field_inits = Vec::new();
 
-    for field in fields.iter() {
+    for field in fields {
         let field_name = field.ident.as_ref().unwrap();
         let field_type = &field.ty;
 
-        let inject_attr = find_inject_attr(&field.attrs);
+        let inject_attr = find_dep_attr(&field.attrs);
 
         match inject_attr {
-            Some(InjectAttr::Required) => {
+            Some(DepAttr::Required) => {
                 // Extract inner type from Arc<T>
                 if let Some(inner_type) = extract_arc_inner_type(field_type) {
                     field_inits.push(quote! {
@@ -139,13 +148,13 @@ pub fn derive_inject(input: TokenStream) -> TokenStream {
                 } else {
                     return syn::Error::new_spanned(
                         field_type,
-                        "Fields marked with #[inject] must have type Arc<T>",
+                        "Fields marked with #[inject]/#[dep] must have type Arc<T>",
                     )
                     .to_compile_error()
                     .into();
                 }
             }
-            Some(InjectAttr::Optional) => {
+            Some(DepAttr::Optional) => {
                 // Extract inner type from Option<Arc<T>>
                 if let Some(inner_type) = extract_option_arc_inner_type(field_type) {
                     field_inits.push(quote! {
@@ -154,7 +163,7 @@ pub fn derive_inject(input: TokenStream) -> TokenStream {
                 } else {
                     return syn::Error::new_spanned(
                         field_type,
-                        "Fields marked with #[inject(optional)] must have type Option<Arc<T>>",
+                        "Fields marked with #[inject(optional)]/#[dep(optional)] must have type Option<Arc<T>>",
                     )
                     .to_compile_error()
                     .into();
@@ -174,8 +183,8 @@ pub fn derive_inject(input: TokenStream) -> TokenStream {
         impl #impl_generics #name #ty_generics #where_clause {
             /// Create an instance by resolving dependencies from a container.
             ///
-            /// All fields marked with `#[inject]` will be resolved from the container.
-            /// Fields not marked with `#[inject]` will use `Default::default()`.
+            /// All fields marked with `#[inject]` (or its alias `#[dep]`) will be
+            /// resolved from the container. Unmarked fields use `Default::default()`.
             pub fn from_container(
                 container: &::dependency_injector::Container
             ) -> ::dependency_injector::Result<Self> {
@@ -189,30 +198,34 @@ pub fn derive_inject(input: TokenStream) -> TokenStream {
     TokenStream::from(expanded)
 }
 
-/// Types of inject attributes
-enum InjectAttr {
+/// Kinds of dependency-marker attributes shared by every derive in this crate.
+enum DepAttr {
     Required,
     Optional,
 }
 
-/// Find and parse the #[inject] attribute
-fn find_inject_attr(attrs: &[Attribute]) -> Option<InjectAttr> {
+/// Find and parse a dependency-marker attribute on a field.
+///
+/// `#[inject]` and `#[dep]` are exact aliases, as are `#[inject(optional)]`
+/// and `#[dep(optional)]`. Every derive in this crate accepts both spellings
+/// and treats them identically.
+fn find_dep_attr(attrs: &[Attribute]) -> Option<DepAttr> {
     for attr in attrs {
-        if attr.path().is_ident("inject") {
-            // Check if it has (optional) argument
+        if attr.path().is_ident("inject") || attr.path().is_ident("dep") {
+            // Bare `#[inject]` / `#[dep]` means required
             if attr.meta.require_path_only().is_ok() {
-                return Some(InjectAttr::Required);
+                return Some(DepAttr::Required);
             }
 
-            // Parse inject(optional)
+            // Parse `#[inject(optional)]` / `#[dep(optional)]`
             if let Ok(nested) = attr.parse_args::<syn::Ident>() {
                 if nested == "optional" {
-                    return Some(InjectAttr::Optional);
+                    return Some(DepAttr::Optional);
                 }
             }
 
             // Default to required
-            return Some(InjectAttr::Required);
+            return Some(DepAttr::Required);
         }
     }
     None
@@ -252,35 +265,6 @@ fn extract_option_arc_inner_type(ty: &Type) -> Option<&Type> {
 // Service Derive Macro
 // =============================================================================
 
-/// Types of dep attributes
-enum DepAttr {
-    Required,
-    Optional,
-}
-
-/// Find and parse the #[dep] attribute
-fn find_dep_attr(attrs: &[Attribute]) -> Option<DepAttr> {
-    for attr in attrs {
-        if attr.path().is_ident("dep") {
-            // Check if it has (optional) argument
-            if attr.meta.require_path_only().is_ok() {
-                return Some(DepAttr::Required);
-            }
-
-            // Parse dep(optional)
-            if let Ok(nested) = attr.parse_args::<syn::Ident>() {
-                if nested == "optional" {
-                    return Some(DepAttr::Optional);
-                }
-            }
-
-            // Default to required
-            return Some(DepAttr::Required);
-        }
-    }
-    None
-}
-
 /// Derive macro for the `Service` trait.
 ///
 /// Generates a `Service` implementation with compile-time dependency declaration.
@@ -291,7 +275,12 @@ fn find_dep_attr(attrs: &[Attribute]) -> Option<DepAttr> {
 /// - `#[dep]` - Mark a field as a required dependency. Must be `Arc<T>`.
 /// - `#[dep(optional)]` - Mark a field as optional. Must be `Option<Arc<T>>`.
 ///
-/// Fields without `#[dep]` use `Default::default()`.
+/// `#[inject]` and `#[inject(optional)]` are accepted as exact aliases of
+/// `#[dep]` and `#[dep(optional)]` respectively, so the same field
+/// annotations work across every derive in this crate. `#[dep]` is the
+/// conventional spelling for this macro.
+///
+/// Fields without a dependency marker use `Default::default()`.
 ///
 /// # Generated Code
 ///
@@ -329,7 +318,7 @@ fn find_dep_attr(attrs: &[Attribute]) -> Option<DepAttr> {
 /// //     }
 /// // }
 /// ```
-#[proc_macro_derive(Service, attributes(dep))]
+#[proc_macro_derive(Service, attributes(dep, inject))]
 pub fn derive_service(input: TokenStream) -> TokenStream {
     let input = parse_macro_input!(input as DeriveInput);
 
@@ -363,7 +352,7 @@ pub fn derive_service(input: TokenStream) -> TokenStream {
     let mut field_inits: Vec<proc_macro2::TokenStream> = Vec::new();
     let mut dep_index = 0usize;
 
-    for field in fields.iter() {
+    for field in fields {
         let field_name = field.ident.as_ref().unwrap();
         let field_type = &field.ty;
 
@@ -382,7 +371,7 @@ pub fn derive_service(input: TokenStream) -> TokenStream {
                 } else {
                     return syn::Error::new_spanned(
                         field_type,
-                        "Fields marked with #[dep] must have type Arc<T>",
+                        "Fields marked with #[dep]/#[inject] must have type Arc<T>",
                     )
                     .to_compile_error()
                     .into();
@@ -400,7 +389,7 @@ pub fn derive_service(input: TokenStream) -> TokenStream {
                 } else {
                     return syn::Error::new_spanned(
                         field_type,
-                        "Fields marked with #[dep(optional)] must have type Option<Arc<T>>",
+                        "Fields marked with #[dep(optional)]/#[inject(optional)] must have type Option<Arc<T>>",
                     )
                     .to_compile_error()
                     .into();
@@ -460,9 +449,15 @@ pub fn derive_service(input: TokenStream) -> TokenStream {
 ///
 /// - `#[dep]` - Mark a field as a required dependency. Must be `Arc<T>`.
 ///
-/// Fields without `#[dep]`, and fields marked `#[dep(optional)]`, are not
-/// included in the dependency list (optional dependencies need not be
-/// present in a registry).
+/// `#[inject]` is accepted as an exact alias of `#[dep]` (and
+/// `#[inject(optional)]` of `#[dep(optional)]`), so the same field
+/// annotations work across every derive in this crate. `#[dep]` is the
+/// conventional spelling for this macro.
+///
+/// Fields without a dependency marker, and fields marked
+/// `#[dep(optional)]`/`#[inject(optional)]`, are not included in the
+/// dependency list (optional dependencies need not be present in a
+/// registry).
 ///
 /// # Example
 ///
@@ -489,7 +484,7 @@ pub fn derive_service(input: TokenStream) -> TokenStream {
 /// //     type Dependencies = Reg<Database, Reg<Cache, ()>>;
 /// // }
 /// ```
-#[proc_macro_derive(TypedRequire, attributes(dep))]
+#[proc_macro_derive(TypedRequire, attributes(dep, inject))]
 pub fn derive_typed_require(input: TokenStream) -> TokenStream {
     let input = parse_macro_input!(input as DeriveInput);
 
@@ -517,10 +512,10 @@ pub fn derive_typed_require(input: TokenStream) -> TokenStream {
         }
     };
 
-    // Collect dependency types (only Arc<T> fields with #[dep])
+    // Collect dependency types (only Arc<T> fields marked #[dep]/#[inject])
     let mut inner_types: Vec<&Type> = Vec::new();
 
-    for field in fields.iter() {
+    for field in fields {
         let field_type = &field.ty;
         let dep_attr = find_dep_attr(&field.attrs);
 
@@ -530,7 +525,7 @@ pub fn derive_typed_require(input: TokenStream) -> TokenStream {
             } else {
                 return syn::Error::new_spanned(
                     field_type,
-                    "Fields marked with #[dep] must have type Arc<T>",
+                    "Fields marked with #[dep]/#[inject] must have type Arc<T>",
                 )
                 .to_compile_error()
                 .into();
