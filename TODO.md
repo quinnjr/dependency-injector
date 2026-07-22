@@ -89,3 +89,11 @@ cd fuzz && cargo +nightly fuzz run fuzz_container -- -max_total_time=60
 *See [CHANGELOG.md](CHANGELOG.md) for version history*
 *See [BENCHMARK_COMPARISON.md](BENCHMARK_COMPARISON.md) for cross-language benchmarks*
 *See [RUST_DI_COMPARISON.md](RUST_DI_COMPARISON.md) for Rust ecosystem comparison*
+
+## Benchmarks
+
+- [ ] Re-run the cross-language mixed-workload benchmarks (samber/do,
+      inversify, dependency-injector/injector/punq) and update
+      BENCHMARK_COMPARISON.md — the 5% scope-creation branches were fixed
+      on 2026-07-21 to do real scope work, so the published numbers for
+      those libraries are stale.

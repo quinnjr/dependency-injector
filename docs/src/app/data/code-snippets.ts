@@ -3,13 +3,13 @@
 export const CODE_SNIPPETS = {
   // Installation
   install: `<span class="text-slate-500">[dependencies]</span>
-<span class="text-rust-400">dependency-injector</span> = <span class="text-green-400">"0.2"</span>`,
+<span class="text-rust-400">dependency-injector</span> = <span class="text-green-400">"2"</span>`,
 
   features: `<span class="text-slate-500">[dependencies]</span>
-<span class="text-rust-400">dependency-injector</span> = { version = <span class="text-green-400">"0.2"</span>, features = [<span class="text-green-400">"async"</span>] }
+<span class="text-rust-400">dependency-injector</span> = { version = <span class="text-green-400">"2"</span>, features = [<span class="text-green-400">"async"</span>] }
 
 <span class="text-slate-500"># Or disable default features</span>
-<span class="text-rust-400">dependency-injector</span> = { version = <span class="text-green-400">"0.2"</span>, default-features = <span class="text-purple-400">false</span> }`,
+<span class="text-rust-400">dependency-injector</span> = { version = <span class="text-green-400">"2"</span>, default-features = <span class="text-purple-400">false</span> }`,
 
   // Quick Start / Home Example
   example: `<span class="text-purple-400">use</span> dependency_injector::Container;
@@ -31,8 +31,9 @@ export const CODE_SNIPPETS = {
     });
 
     <span class="text-slate-500">// Lazy initialization</span>
-    container.lazy(|| UserService {
-        db: container.get().unwrap()
+    <span class="text-purple-400">let</span> c = container.clone();
+    container.lazy(<span class="text-purple-400">move</span> || UserService {
+        db: c.get().unwrap()
     });
 
     <span class="text-slate-500">// Resolve anywhere</span>
@@ -62,8 +63,9 @@ export const CODE_SNIPPETS = {
     });
 
     <span class="text-slate-500">// Register a service with a factory</span>
-    container.lazy(|| UserService {
-        db: container.get().unwrap(),
+    <span class="text-purple-400">let</span> c = container.clone();
+    container.lazy(<span class="text-purple-400">move</span> || UserService {
+        db: c.get().unwrap(),
     });
 
     <span class="text-slate-500">// Resolve services</span>

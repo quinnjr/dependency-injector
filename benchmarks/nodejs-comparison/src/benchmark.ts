@@ -313,7 +313,10 @@ async function runBenchmarks() {
         } else if (op < 19) {
           inversifyContainer.get(TYPES.Database);
         } else {
-          inversifyContainer.get(TYPES.Config);
+          // 5% - create a child container and resolve from it (inversify 7
+          // replaced createChild() with the parent container option)
+          const scope = new InversifyContainer({ parent: inversifyContainer });
+          scope.get(TYPES.Config);
         }
       }
     }, 10000),

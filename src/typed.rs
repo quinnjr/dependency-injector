@@ -72,6 +72,43 @@ pub trait HasType<T: Injectable> {}
 
 impl<T: Injectable, Rest> HasType<T> for Reg<T, Rest> {}
 
+/// Trait for services that declare their dependencies as a type-level list.
+///
+/// The `Dependencies` associated type is a [`Reg`] chain terminated by `()`,
+/// mirroring the registry type built by [`TypedBuilder`]. Implement it by
+/// hand, or derive it with `#[derive(TypedRequire)]` when the `derive`
+/// feature is enabled.
+///
+/// This trait is declaration-only: nothing in the library consumes
+/// `Dependencies` at runtime. It exists so the derived list can be checked
+/// against a [`TypedBuilder`] registry type at compile time (see
+/// `tests/typed_require.rs`). It is distinct from [`DeclaresDeps`], which
+/// carries runtime dependency *names* for the builder's `with_deps`
+/// verification path — a service may implement either or both.
+///
+/// # Example
+///
+/// ```rust
+/// use dependency_injector::typed::{Reg, Require};
+///
+/// #[derive(Clone)]
+/// struct Database;
+///
+/// #[derive(Clone)]
+/// struct Cache;
+///
+/// #[derive(Clone)]
+/// struct UserService;
+///
+/// impl Require for UserService {
+///     type Dependencies = Reg<Database, Reg<Cache, ()>>;
+/// }
+/// ```
+pub trait Require {
+    /// Type-level list of required dependencies: `Reg<T1, Reg<T2, ... ()>>`.
+    type Dependencies;
+}
+
 // =============================================================================
 // Type-State Builder
 // =============================================================================

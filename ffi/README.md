@@ -5,6 +5,7 @@ This directory contains FFI (Foreign Function Interface) bindings that allow the
 ## Supported Languages
 
 - **C/C++** - via `dependency_injector.h`
+- **C#** - via `csharp/` package (P/Invoke, NuGet: `PegasusHeavy.DependencyInjector`)
 - **Go** - via `go/di` package
 - **Node.js/TypeScript** - via `nodejs/` package
 - **Python** - via `python/` package
@@ -55,6 +56,55 @@ int main() {
 Compile with:
 ```bash
 gcc -o myapp myapp.c -L/path/to/target/release -ldependency_injector -I/path/to/ffi
+```
+
+## C# Usage
+
+### Setup
+
+1. Install the NuGet package (bundles pre-built native libraries):
+   ```bash
+   dotnet add package PegasusHeavy.DependencyInjector
+   ```
+
+   Or build the native library from source and point to it:
+   ```bash
+   cargo rustc --release --features ffi --crate-type cdylib
+   export DI_LIBRARY_PATH=$(pwd)/target/release/libdependency_injector.so
+   ```
+
+### Example
+
+```csharp
+using DependencyInjector;
+
+record Config(bool Debug, int Port);
+
+// Create container (IDisposable - freed at end of scope)
+using var container = new Container();
+
+// Register services (JSON serialization)
+container.Register("Config", new Config(Debug: true, Port: 8080));
+
+// Resolve services
+var config = container.Resolve<Config>("Config");
+Console.WriteLine(config.Port); // 8080
+
+// Optional resolution and lookups
+var missing = container.TryResolve<Config>("NonExistent"); // null
+Console.WriteLine(container.Contains("Config")); // True
+
+// Scoped containers
+using var requestScope = container.Scope();
+requestScope.Register("RequestId", new { Id = "req-123" });
+```
+
+### Running the Example
+
+```bash
+cd ffi/csharp
+export LD_LIBRARY_PATH=/path/to/dependency-injector/target/release:$LD_LIBRARY_PATH
+dotnet run --project Example
 ```
 
 ## Go Usage
@@ -223,10 +273,10 @@ pnpm run example
 ### Example
 
 ```python
-from dependency_injector.container import CachingContainer
+from dependency_injector import Container
 
 # Create container
-container = CachingContainer()
+container = Container()
 
 # Register services (JSON serialization)
 container.register("Config", {"debug": True, "port": 8080})

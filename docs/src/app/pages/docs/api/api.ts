@@ -20,13 +20,18 @@ export class ApiPage implements OnInit {
     { name: 'get<T>()', description: 'Resolves a service, returning an Arc<T>', returns: 'Result<Arc<T>, DiError>' },
     { name: 'try_get<T>()', description: 'Tries to resolve a service, returning None if not found', returns: 'Option<Arc<T>>' },
     { name: 'contains<T>()', description: 'Checks if a service is registered', returns: 'bool' },
-    { name: 'scope()', description: 'Creates a child scope that inherits from this container', returns: 'ScopedContainer' },
+    { name: 'scope()', description: 'Creates a child scope that inherits from this container', returns: 'Container' },
     { name: 'lock()', description: 'Prevents further registrations', returns: '()' },
   ];
 
   errorVariants = [
     { name: 'NotFound', description: 'The requested service type was not found in the container or any parent scope' },
-    { name: 'FactoryPanicked', description: 'The factory function panicked during service creation' },
+    { name: 'CircularDependency', description: 'A circular dependency was detected while resolving the service' },
+    { name: 'CreationFailed', description: 'The factory failed to create the service, with a reason describing the failure' },
+    { name: 'Locked', description: 'The container is locked and cannot register new services' },
+    { name: 'AlreadyRegistered', description: 'Attempted to register a service type that is already registered' },
+    { name: 'ParentDropped', description: 'The parent scope has been dropped' },
+    { name: 'Internal', description: 'An internal DI error occurred' },
   ];
 
   ngOnInit(): void {

@@ -62,8 +62,13 @@
       </p>
       <ul class="feature-list">
         <li><code>DiError::NotFound</code> - Service type not registered in container or parent scopes</li>
-        <li><code>DiError::FactoryPanicked</code> - Factory function panicked during creation</li>
+        <li><code>DiError::CircularDependency</code> - Circular dependency detected during resolution</li>
+        <li><code>DiError::CreationFailed</code> - Factory reported a failure while creating the service</li>
       </ul>
+      <p>
+        Note that factory panics are not caught by the container — a panicking factory
+        propagates the panic to the caller rather than returning an error.
+      </p>
 
       <div class="nav-cards">
         <a routerLink="/docs/api" class="nav-card">

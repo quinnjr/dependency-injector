@@ -83,6 +83,35 @@ class TestContainer:
         assert container.service_count == 7
         container.free()
 
+    def test_register_bytes(self):
+        """Should register raw bytes."""
+        container = Container()
+        assert container.service_count == 0
+        container.register_bytes("Blob", b"\x00\x01\xffraw-bytes")
+        assert container.contains("Blob")
+        assert container.service_count == 1
+        container.free()
+
+    def test_register_bytes_duplicate_raises(self):
+        """Should raise when registering duplicate raw bytes."""
+        container = Container()
+        container.register_bytes("Blob", b"first")
+        with pytest.raises(DIError) as exc_info:
+            container.register_bytes("Blob", b"second")
+        assert exc_info.value.code == ErrorCode.ALREADY_REGISTERED
+        container.free()
+
+    def test_resolve_round_trip_special_characters(self):
+        """Non-ASCII and escaped-quote payloads must survive the native
+        decode path (_take_native_string) byte-for-byte."""
+        container = Container()
+        try:
+            value = {"msg": 'h\u00e9llo "quoted" \u4e16\u754c', "n": [1, 2, 3]}
+            container.register("Sp\u00e9cial", value)
+            assert container.resolve("Sp\u00e9cial") == value
+        finally:
+            container.free()
+
     def test_scope_creation(self):
         """Should create a child scope."""
         container = Container()

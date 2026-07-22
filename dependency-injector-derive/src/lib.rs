@@ -4,6 +4,7 @@
 //!
 //! - `#[derive(Inject)]` - Generate `from_container()` for runtime DI
 //! - `#[derive(Service)]` - Generate `Service` trait impl for compile-time verified DI
+//! - `#[derive(TypedRequire)]` - Generate `Require` trait impl declaring type-level dependencies
 //!
 //! # Inject Example
 //!
@@ -451,13 +452,22 @@ pub fn derive_service(input: TokenStream) -> TokenStream {
 
 /// Derive macro for the `Require` trait (type-level dependencies).
 ///
-/// Generates a `Require` implementation that declares dependencies
-/// at the type level for use with `TypedBuilder`.
+/// Generates a `dependency_injector::typed::Require` implementation that
+/// declares dependencies at the type level as a `Reg` chain terminated by
+/// `()`, mirroring the registry type built by `TypedBuilder`.
+///
+/// # Attributes
+///
+/// - `#[dep]` - Mark a field as a required dependency. Must be `Arc<T>`.
+///
+/// Fields without `#[dep]`, and fields marked `#[dep(optional)]`, are not
+/// included in the dependency list (optional dependencies need not be
+/// present in a registry).
 ///
 /// # Example
 ///
 /// ```rust,ignore
-/// use dependency_injector_derive::TypedRequire;
+/// use dependency_injector::TypedRequire;
 /// use std::sync::Arc;
 ///
 /// #[derive(Clone)]
@@ -475,8 +485,8 @@ pub fn derive_service(input: TokenStream) -> TokenStream {
 /// }
 ///
 /// // Generated:
-/// // impl Require for UserService {
-/// //     type Dependencies = Has<Database, Has<Cache, Empty>>;
+/// // impl dependency_injector::typed::Require for UserService {
+/// //     type Dependencies = Reg<Database, Reg<Cache, ()>>;
 /// // }
 /// ```
 #[proc_macro_derive(TypedRequire, attributes(dep))]
@@ -528,11 +538,10 @@ pub fn derive_typed_require(input: TokenStream) -> TokenStream {
         }
     }
 
-    // Build the type-level list: Has<T1, Has<T2, ... Has<Tn, Empty>>>
-    let deps_type = inner_types.iter().rev().fold(
-        quote! { ::dependency_injector::typed::Empty },
-        |acc, ty| quote! { ::dependency_injector::typed::Has<#ty, #acc> },
-    );
+    // Build the type-level list: Reg<T1, Reg<T2, ... Reg<Tn, ()>>>
+    let deps_type = inner_types.iter().rev().fold(quote! { () }, |acc, ty| {
+        quote! { ::dependency_injector::typed::Reg<#ty, #acc> }
+    });
 
     // Generate the implementation
     let expanded = quote! {

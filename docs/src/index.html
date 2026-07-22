@@ -16,7 +16,7 @@
 
   <!-- Primary Meta Tags -->
   <meta name="title" content="Dependency Injector - High-Performance DI for Rust, Go, Node.js, Python & C#">
-  <meta name="description" content="A lightning-fast, lock-free dependency injection container for Rust with FFI bindings for Go, Node.js, Python, and C#. ~9ns singleton resolution, type-safe, zero-config, thread-safe. Built for modern concurrent applications.">
+  <meta name="description" content="A lightning-fast, lock-free dependency injection container for Rust with FFI bindings for Go, Node.js, Python, and C#. Sub-20ns cached singleton resolution, type-safe, zero-config, thread-safe. Built for modern concurrent applications.">
   <meta name="keywords" content="rust dependency injection, di container, ioc container, rust di, go dependency injection, nodejs di, python di, csharp di, ffi bindings, lock-free, thread-safe, high-performance, service locator, inversion of control, rust library, cross-language di">
   <meta name="author" content="Pegasus Heavy Industries">
   <meta name="robots" content="index, follow">
@@ -30,7 +30,7 @@
   <meta property="og:type" content="website">
   <meta property="og:url" content="https://pegasusheavy.github.io/dependency-injector/">
   <meta property="og:title" content="Dependency Injector - High-Performance DI for Rust, Go, Node.js, Python & C#">
-  <meta property="og:description" content="Lightning-fast dependency injection with ~9ns resolution. Cross-language FFI bindings for Go, Node.js, Python, and C#. Lock-free, thread-safe, type-safe.">
+  <meta property="og:description" content="Lightning-fast dependency injection with sub-20ns cached resolution. Cross-language FFI bindings for Go, Node.js, Python, and C#. Lock-free, thread-safe, type-safe.">
   <meta property="og:image" content="https://pegasusheavy.github.io/dependency-injector/og-image.png">
   <meta property="og:image:width" content="1200">
   <meta property="og:image:height" content="630">
@@ -41,7 +41,7 @@
   <meta name="twitter:card" content="summary_large_image">
   <meta name="twitter:url" content="https://pegasusheavy.github.io/dependency-injector/">
   <meta name="twitter:title" content="Dependency Injector - High-Performance DI for Rust, Go, Node.js, Python & C#">
-  <meta name="twitter:description" content="Lightning-fast dependency injection with ~9ns resolution. Cross-language FFI bindings for Go, Node.js, Python, and C#. Lock-free, thread-safe, type-safe.">
+  <meta name="twitter:description" content="Lightning-fast dependency injection with sub-20ns cached resolution. Cross-language FFI bindings for Go, Node.js, Python, and C#. Lock-free, thread-safe, type-safe.">
   <meta name="twitter:image" content="https://pegasusheavy.github.io/dependency-injector/og-image.png">
   <meta name="twitter:creator" content="@PegasusHeavy">
 
@@ -134,7 +134,7 @@
         "name": "What is dependency-injector?",
         "acceptedAnswer": {
           "@type": "Answer",
-          "text": "dependency-injector is a high-performance, lock-free dependency injection container for Rust. It achieves ~9ns singleton resolution times and provides type-safe, zero-config dependency management for modern concurrent applications."
+          "text": "dependency-injector is a high-performance, lock-free dependency injection container for Rust. It achieves sub-20ns cached singleton resolution times and provides type-safe, zero-config dependency management for modern concurrent applications."
         }
       },
       {
@@ -174,7 +174,7 @@
         "name": "How do I install dependency-injector?",
         "acceptedAnswer": {
           "@type": "Answer",
-          "text": "For Rust: Add `dependency-injector = \"0.2\"` to Cargo.toml. For other languages, build the Rust library with `cargo rustc --release --features ffi --crate-type cdylib` and use the respective language bindings (Go: go get, Node.js: pnpm add, Python: pip install, C#: dotnet add)."
+          "text": "For Rust: Add `dependency-injector = \"2\"` to Cargo.toml. For other languages, build the Rust library with `cargo rustc --release --features ffi --crate-type cdylib` and use the respective language bindings (Go: go get, Node.js: pnpm add, Python: pip install, C#: dotnet add)."
         }
       }
     ]
@@ -192,7 +192,7 @@
       {
         "@type": "HowToStep",
         "name": "Add to Cargo.toml",
-        "text": "Add dependency-injector = \"0.2\" to your Cargo.toml dependencies section"
+        "text": "Add dependency-injector = \"2\" to your Cargo.toml dependencies section"
       },
       {
         "@type": "HowToStep",

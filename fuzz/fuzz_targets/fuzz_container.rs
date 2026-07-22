@@ -62,7 +62,15 @@ enum ContainerOp {
 fuzz_target!(|ops: Vec<ContainerOp>| {
     let container = Container::new();
 
-    // Track what we've registered
+    // No cache hygiene needed: hot-cache entries are generation-stamped and
+    // storage generations are globally unique, so entries left behind by a
+    // previous iteration's container can never hit on this one. Not clearing
+    // here also lets the fuzzer exercise that invalidation mechanism.
+
+    // Shadow registration state. On this root container (no parent scopes),
+    // registration via singleton/lazy/transient always succeeds and overwrites
+    // any previous registration for the same type, so each boolean exactly
+    // tracks whether resolution of that type must succeed.
     let mut has_small = false;
     let mut has_medium = false;
     let mut has_large = false;
@@ -96,52 +104,58 @@ fuzz_target!(|ops: Vec<ContainerOp>| {
                 has_small = true;
             }
             ContainerOp::GetSmall => {
+                // On a root container, resolution succeeds iff registered.
                 let result = container.get::<SmallService>();
-                if has_small {
-                    // Should succeed if registered
-                    assert!(result.is_ok() || result.is_err());
-                }
+                assert_eq!(result.is_ok(), has_small);
             }
             ContainerOp::GetMedium => {
                 let result = container.get::<MediumService>();
-                if has_medium {
-                    assert!(result.is_ok() || result.is_err());
-                }
+                assert_eq!(result.is_ok(), has_medium);
             }
             ContainerOp::GetLarge => {
                 let result = container.get::<LargeService>();
-                if has_large {
-                    assert!(result.is_ok() || result.is_err());
-                }
+                assert_eq!(result.is_ok(), has_large);
             }
             ContainerOp::TryGetSmall => {
-                let _ = container.try_get::<SmallService>();
+                assert_eq!(container.try_get::<SmallService>().is_some(), has_small);
             }
             ContainerOp::TryGetMedium => {
-                let _ = container.try_get::<MediumService>();
+                assert_eq!(container.try_get::<MediumService>().is_some(), has_medium);
             }
             ContainerOp::ContainsSmall => {
-                let result = container.contains::<SmallService>();
-                // After clear, has_small is invalid, so just verify no panic
-                let _ = result;
+                // `contains` reads storage directly (no hot cache), so it must
+                // agree with the shadow registration state at all times.
+                assert_eq!(container.contains::<SmallService>(), has_small);
             }
             ContainerOp::ContainsMedium => {
-                let _ = container.contains::<MediumService>();
+                assert_eq!(container.contains::<MediumService>(), has_medium);
             }
             ContainerOp::ContainsLarge => {
-                let _ = container.contains::<LargeService>();
+                assert_eq!(container.contains::<LargeService>(), has_large);
             }
             ContainerOp::Clear => {
+                // `clear()` invalidates the hot cache automatically (the
+                // storage stamps a fresh generation on every mutation), so the
+                // Ok/Err assertions below also verify that invalidation works.
                 container.clear();
                 has_small = false;
                 has_medium = false;
                 has_large = false;
             }
             ContainerOp::GetLen => {
-                let _ = container.len();
+                // The three fuzzed types are the only ones ever registered, and
+                // re-registering a type overwrites rather than adds, so `len()`
+                // must equal the number of currently registered types.
+                let expected = usize::from(has_small)
+                    + usize::from(has_medium)
+                    + usize::from(has_large);
+                assert_eq!(container.len(), expected);
             }
             ContainerOp::IsEmpty => {
-                let _ = container.is_empty();
+                assert_eq!(
+                    container.is_empty(),
+                    !(has_small || has_medium || has_large)
+                );
             }
         }
     }

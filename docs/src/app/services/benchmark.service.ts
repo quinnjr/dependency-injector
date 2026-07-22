@@ -1,4 +1,4 @@
-import { Injectable, signal } from '@angular/core';
+import { Injectable, computed, signal } from '@angular/core';
 
 export interface BenchmarkEntry {
   commit: {
@@ -33,6 +33,8 @@ export interface BenchmarkData {
 }
 
 export interface ProcessedBenchmark {
+  /** Benchmark suite this entry belongs to (bench names repeat across suites). */
+  suite: string;
   name: string;
   current: number;
   previous: number | null;
@@ -52,12 +54,26 @@ export class BenchmarkService {
 
   readonly loading = signal(true);
   readonly error = signal<string | null>(null);
+  readonly usingSampleData = signal(false);
   readonly data = signal<BenchmarkData | null>(null);
   readonly processedBenchmarks = signal<ProcessedBenchmark[]>([]);
+
+  /** Short id of the most recent benchmarked commit across all suites. */
+  readonly latestCommit = computed(() => {
+    const data = this.data();
+    if (!data?.entries) return '';
+
+    const entries = Object.values(data.entries).flat();
+    if (entries.length === 0) return '';
+
+    const latest = [...entries].sort((a, b) => b.date - a.date)[0];
+    return latest.commit.id.slice(0, 7);
+  });
 
   async loadBenchmarks(): Promise<void> {
     this.loading.set(true);
     this.error.set(null);
+    this.usingSampleData.set(false);
 
     try {
       // Try to fetch from gh-pages benchmark data
@@ -67,21 +83,24 @@ export class BenchmarkService {
         this.data.set(response);
         this.processedBenchmarks.set(this.processBenchmarks(response));
       } else {
-        // Use sample data for development/preview
-        const sampleData = this.getSampleData();
-        this.data.set(sampleData);
-        this.processedBenchmarks.set(this.processBenchmarks(sampleData));
+        // Live data unavailable - fall back to bundled sample data
+        this.useSampleData();
       }
     } catch (e) {
       console.error('Failed to load benchmarks:', e);
       this.error.set('Failed to load benchmark data. Showing sample data.');
-      // Use sample data as fallback
-      const sampleData = this.getSampleData();
-      this.data.set(sampleData);
-      this.processedBenchmarks.set(this.processBenchmarks(sampleData));
+      this.useSampleData();
     } finally {
       this.loading.set(false);
     }
+  }
+
+  /** Fall back to the bundled sample dataset, flagging it as such. */
+  private useSampleData(): void {
+    this.usingSampleData.set(true);
+    const sampleData = this.getSampleData();
+    this.data.set(sampleData);
+    this.processedBenchmarks.set(this.processBenchmarks(sampleData));
   }
 
   private async fetchBenchmarkData(): Promise<BenchmarkData | null> {
@@ -101,15 +120,16 @@ export class BenchmarkService {
 
       // Try parsing as plain JSON
       return JSON.parse(text);
-    } catch {
+    } catch (e) {
+      console.warn('Benchmark live-data fetch failed, trying fallback:', e);
       // Try fallback URL
       try {
         const fallbackResponse = await fetch(this.FALLBACK_URL);
         if (fallbackResponse.ok) {
           return await fallbackResponse.json();
         }
-      } catch {
-        // Ignore fallback errors
+      } catch (fallbackError) {
+        console.warn('Benchmark fallback fetch failed:', fallbackError);
       }
       return null;
     }
@@ -147,6 +167,7 @@ export class BenchmarkService {
           .reverse(); // Oldest first for charts
 
         results.push({
+          suite: suiteName,
           name: bench.name,
           current: bench.value,
           previous: previousBench?.value || null,
@@ -163,13 +184,14 @@ export class BenchmarkService {
   }
 
   private getSampleData(): BenchmarkData {
-    const now = Date.now();
+    // Bundled sample results, measured on v0.2.1 (Dec 2025) - not live data.
+    // Timestamps are fixed to the real measurement date, not the current time.
+    const measured = Date.UTC(2025, 11, 15);
     const day = 24 * 60 * 60 * 1000;
 
-    // Actual benchmark results from v0.2.1 (Dec 2025)
     // Phase 11: Fast bit-mixing hash + single DashMap lookup + reduced shards
     return {
-      lastUpdate: new Date().toISOString(),
+      lastUpdate: new Date(measured).toISOString(),
       repoUrl: 'https://github.com/pegasusheavy/dependency-injector',
       entries: {
         'Rust Benchmarks': [
@@ -177,11 +199,11 @@ export class BenchmarkService {
             commit: {
               id: 'e7ed62b',
               message: 'perf: Phase 11 - Fast bit-mixing hash + single DashMap lookup',
-              timestamp: new Date(now).toISOString(),
+              timestamp: new Date(measured).toISOString(),
               url: 'https://github.com/pegasusheavy/dependency-injector/commit/e7ed62b',
               author: { name: 'Developer', username: 'pegasusheavy' }
             },
-            date: now,
+            date: measured,
             tool: 'cargo',
             benches: [
               // Registration benchmarks
@@ -227,11 +249,11 @@ export class BenchmarkService {
             commit: {
               id: 'v0.1.5',
               message: 'feat: Phase 4 - Derive macros for automatic injection',
-              timestamp: new Date(now - day).toISOString(),
+              timestamp: new Date(measured - day).toISOString(),
               url: 'https://github.com/pegasusheavy/dependency-injector/commit/v0.1.5',
               author: { name: 'Developer', username: 'pegasusheavy' }
             },
-            date: now - day,
+            date: measured - day,
             tool: 'cargo',
             benches: [
               { name: 'registration/singleton_small', value: 250, unit: 'ns/iter', range: '± 5' },
@@ -261,11 +283,11 @@ export class BenchmarkService {
             commit: {
               id: 'v0.1.0',
               message: 'Initial release',
-              timestamp: new Date(now - 2 * day).toISOString(),
+              timestamp: new Date(measured - 2 * day).toISOString(),
               url: 'https://github.com/pegasusheavy/dependency-injector/releases/tag/v0.1.0',
               author: { name: 'Developer', username: 'pegasusheavy' }
             },
-            date: now - 2 * day,
+            date: measured - 2 * day,
             tool: 'cargo',
             benches: [
               { name: 'registration/singleton_small', value: 854, unit: 'ns/iter', range: '± 24' },

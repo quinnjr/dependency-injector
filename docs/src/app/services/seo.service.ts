@@ -113,7 +113,7 @@ export class SeoService {
   setHomeSeo(): void {
     this.updateSeo({
       title: 'Dependency Injector - High-Performance DI for Rust, Go, Node.js, Python & C#',
-      description: 'Lightning-fast dependency injection with ~9ns resolution. Cross-language FFI bindings for Go, Node.js, Python, and C#. Lock-free, thread-safe, type-safe.',
+      description: 'Lightning-fast dependency injection with sub-20ns cached resolution. Cross-language FFI bindings for Go, Node.js, Python, and C#. Lock-free, thread-safe, type-safe.',
       keywords: ['rust library', 'cross-language di', 'performance'],
       canonical: this.baseUrl,
       jsonLd: {
@@ -129,7 +129,7 @@ export class SeoService {
   setBenchmarksSeo(): void {
     this.updateSeo({
       title: 'Benchmarks - Dependency Injector Performance Comparison',
-      description: 'Comprehensive benchmarks comparing dependency-injector against other DI solutions in Rust, Go, Node.js, Python, and C#. See how we achieve ~9ns singleton resolution.',
+      description: 'Comprehensive benchmarks comparing dependency-injector against other DI solutions in Rust, Go, Node.js, Python, and C#. See how we achieve 17-32ns singleton resolution.',
       keywords: ['benchmark', 'performance comparison', 'di performance', 'rust benchmark'],
       canonical: `${this.baseUrl}/benchmarks`,
       jsonLd: {

@@ -41,12 +41,14 @@ package di
 
 #include "dependency_injector.h"
 #include <stdlib.h>
+#include <string.h>
 */
 import "C"
 import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math"
 	"runtime"
 	"unsafe"
 )
@@ -259,8 +261,14 @@ func (c *Container) Resolve(typeName string) ([]byte, error) {
 	}
 	defer C.di_string_free(jsonPtr)
 
-	// Copy the string to Go memory
-	return []byte(C.GoString(jsonPtr)), nil
+	// Single copy into Go memory (GoString + []byte conversion would
+	// allocate and copy twice). GoBytes takes a C.int length, so guard
+	// against payloads that would overflow it.
+	n := C.strlen(jsonPtr)
+	if uint64(n) > uint64(math.MaxInt32) {
+		return nil, fmt.Errorf("di: resolved service data too large (%d bytes)", uint64(n))
+	}
+	return C.GoBytes(unsafe.Pointer(jsonPtr), C.int(n)), nil
 }
 
 // ResolveInto retrieves a service and unmarshals it from JSON into the target.
