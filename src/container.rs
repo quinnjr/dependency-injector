@@ -312,6 +312,7 @@ impl Container {
         self.check_not_locked();
 
         let type_id = TypeId::of::<T>();
+        #[cfg(feature = "logging")]
         let type_name = std::any::type_name::<T>();
 
         #[cfg(feature = "logging")]
@@ -354,6 +355,7 @@ impl Container {
         self.check_not_locked();
 
         let type_id = TypeId::of::<T>();
+        #[cfg(feature = "logging")]
         let type_name = std::any::type_name::<T>();
 
         #[cfg(feature = "logging")]
@@ -400,6 +402,7 @@ impl Container {
         self.check_not_locked();
 
         let type_id = TypeId::of::<T>();
+        #[cfg(feature = "logging")]
         let type_name = std::any::type_name::<T>();
 
         #[cfg(feature = "logging")]
@@ -568,6 +571,7 @@ impl Container {
     /// hot path - most resolutions hit the cache and don't need parent traversal.
     #[cold]
     fn resolve_from_parents<T: Injectable>(&self, type_id: &TypeId) -> Result<Arc<T>> {
+        #[cfg(feature = "logging")]
         let type_name = std::any::type_name::<T>();
 
         #[cfg(feature = "logging")]
@@ -795,6 +799,7 @@ impl Container {
     /// Does not affect parent scopes.
     #[inline]
     pub fn clear(&self) {
+        #[cfg(feature = "logging")]
         let count = self.storage.len();
         self.storage.clear();
 
