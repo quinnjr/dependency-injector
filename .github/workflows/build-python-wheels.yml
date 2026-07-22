@@ -40,7 +40,7 @@ jobs:
             cross: true
 
           # macOS x64 (Intel)
-          - os: macos-13
+          - os: macos-15-intel
             platform: macosx_10_12_x86_64
             rust_target: x86_64-apple-darwin
             python_arch: x86_64
