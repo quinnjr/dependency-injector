@@ -35,7 +35,7 @@ jobs:
             cross: true
 
           # macOS x64 (Intel)
-          - os: macos-13
+          - os: macos-15-intel
             target: x86_64-apple-darwin
             artifact: libdependency_injector.dylib
             asset_name: libdependency_injector-darwin-x64.dylib
