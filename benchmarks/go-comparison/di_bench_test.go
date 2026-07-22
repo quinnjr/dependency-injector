@@ -8,6 +8,7 @@
 package main
 
 import (
+	"strconv"
 	"sync"
 	"testing"
 
@@ -422,7 +423,7 @@ func BenchmarkMixedWorkload(b *testing.B) {
 					// 80% - resolve
 					_ = container.Get("config")
 				case 16, 17, 18:
-					// 15% - check existence
+					// 15% - additional resolve (lookup)
 					_ = container.Get("database")
 				default:
 					// 5% - new scope (simulate with new map)
@@ -463,7 +464,6 @@ func BenchmarkMixedWorkload(b *testing.B) {
 		do.Provide(injector, func(i do.Injector) (*Database, error) {
 			return NewDatabase(NewConfig()), nil
 		})
-		scopeCounter := 0
 		b.ResetTimer()
 		for i := 0; i < b.N; i++ {
 			for j := 0; j < 100; j++ {
@@ -473,10 +473,12 @@ func BenchmarkMixedWorkload(b *testing.B) {
 				case 16, 17, 18:
 					_, _ = do.Invoke[*Database](injector)
 				default:
-					// Create a unique scope name each time
-					scopeCounter++
-					// Skip scope creation for now as samber/do doesn't support dynamic scopes well
-					_ = scopeCounter
+					// 5% - create a child scope and register a service in it
+					// (mirrors peers' new-container + register work; samber/do
+					// requires unique scope names, so derive one from the loop
+					// counters)
+					scope := injector.Scope(strconv.Itoa(i*100 + j))
+					do.ProvideValue(scope, NewConfig())
 				}
 			}
 		}

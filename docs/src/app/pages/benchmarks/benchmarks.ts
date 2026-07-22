@@ -1,4 +1,4 @@
-import { Component, OnInit, inject } from '@angular/core';
+import { Component, OnInit, computed, inject } from '@angular/core';
 import { CommonModule } from '@angular/common';
 import { FontAwesomeModule } from '@fortawesome/angular-fontawesome';
 import { BenchmarkService, ProcessedBenchmark } from '../../services/benchmark.service';
@@ -14,6 +14,30 @@ import { SeoService } from '../../services/seo.service';
 export class BenchmarksPage implements OnInit {
   readonly benchmarkService = inject(BenchmarkService);
   private readonly seo = inject(SeoService);
+
+  readonly lastCommit = this.benchmarkService.latestCommit;
+
+  readonly lastUpdate = computed(() => {
+    const data = this.benchmarkService.data();
+    if (!data?.lastUpdate) return '';
+
+    return new Date(data.lastUpdate).toLocaleDateString('en-US', {
+      year: 'numeric',
+      month: 'short',
+      day: 'numeric',
+      hour: '2-digit',
+      minute: '2-digit'
+    });
+  });
+
+  readonly sparklinePoints = computed(() => {
+    const points = new Map<string, string>();
+    for (const benchmark of this.benchmarkService.processedBenchmarks()) {
+      // Composite key: bench names can repeat across suites
+      points.set(`${benchmark.suite}/${benchmark.name}`, this.computeSparklinePoints(benchmark));
+    }
+    return points;
+  });
 
   ngOnInit(): void {
     this.seo.setBenchmarksSeo();
@@ -38,7 +62,7 @@ export class BenchmarksPage implements OnInit {
     return `${sign}${changePercent.toFixed(1)}%`;
   }
 
-  getSparklinePoints(benchmark: ProcessedBenchmark): string {
+  private computeSparklinePoints(benchmark: ProcessedBenchmark): string {
     if (!benchmark.history || benchmark.history.length < 2) return '';
 
     const values = benchmark.history.map(h => h.value);
@@ -57,29 +81,5 @@ export class BenchmarksPage implements OnInit {
         return `${x},${y}`;
       })
       .join(' ');
-  }
-
-  getLastCommit(): string {
-    const data = this.benchmarkService.data();
-    if (!data?.entries) return '';
-
-    const entries = Object.values(data.entries).flat();
-    if (entries.length === 0) return '';
-
-    const latest = entries.sort((a, b) => b.date - a.date)[0];
-    return latest.commit.id.slice(0, 7);
-  }
-
-  getLastUpdate(): string {
-    const data = this.benchmarkService.data();
-    if (!data?.lastUpdate) return '';
-
-    return new Date(data.lastUpdate).toLocaleDateString('en-US', {
-      year: 'numeric',
-      month: 'short',
-      day: 'numeric',
-      hour: '2-digit',
-      minute: '2-digit'
-    });
   }
 }

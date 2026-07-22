@@ -1,5 +1,11 @@
 # Dependency Injector: Cross-Language Benchmark Comparison
 
+> **⚠️ Mixed-workload figures pending re-measurement (2026-07-21):** the
+> comparison benchmarks' "5% scope creation" branches previously under-worked
+> for samber/do, inversify, and the Python libraries (no real scope was
+> created). The benchmark code has been fixed; the mixed-workload numbers
+> below for those libraries predate the fix and will change when re-run.
+
 Comprehensive benchmarks comparing Rust `dependency-injector` against popular Go, Node.js, Python, and C# DI libraries.
 
 **Test Environment:**

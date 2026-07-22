@@ -1,6 +1,6 @@
 [package]
 name = "dependency-injector"
-version = "1.0.0"
+version = "2.0.0"
 edition = "2024"
 rust-version = "1.85"
 description = "High-performance, lock-free dependency injection container for Rust"
@@ -108,7 +108,7 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"], optional = tr
 tokio = { version = "1.0", features = ["sync"], optional = true }
 
 # Derive macros (optional)
-dependency-injector-derive = { version = "0.1.0", path = "dependency-injector-derive", optional = true }
+dependency-injector-derive = { version = "2.0.0", path = "dependency-injector-derive", optional = true }
 
 # Minimal perfect hashing for locked containers (optional)
 boomphf = { version = "0.6", optional = true }

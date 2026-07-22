@@ -204,3 +204,31 @@ jobs:
           files: lcov.info
           fail_ci_if_error: false
 
+  fuzz:
+    name: Fuzz (smoke)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@nightly
+
+      - name: Install cargo-fuzz
+        uses: taiki-e/install-action@cargo-fuzz
+
+      - name: Cache cargo registry
+        uses: actions/cache@v5
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            fuzz/target
+          key: ${{ runner.os }}-cargo-fuzz-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-fuzz-
+
+      - name: Run fuzz targets (30s each)
+        run: |
+          for target in fuzz_container fuzz_scoped fuzz_concurrent fuzz_lifecycle; do
+            cargo +nightly fuzz run "$target" -- -max_total_time=30 -timeout=10
+          done

@@ -149,8 +149,11 @@ _lib.di_register_singleton.restype = c_int
 _lib.di_register_singleton_json.argtypes = [c_void_p, c_char_p, c_char_p]
 _lib.di_register_singleton_json.restype = c_int
 
+# Returns a library-owned string that must be freed with di_string_free(),
+# so the restype is c_void_p to keep the raw pointer (c_char_p would convert
+# to bytes and discard the pointer, leaking the allocation).
 _lib.di_resolve_json.argtypes = [c_void_p, c_char_p]
-_lib.di_resolve_json.restype = c_char_p
+_lib.di_resolve_json.restype = c_void_p
 
 _lib.di_contains.argtypes = [c_void_p, c_char_p]
 _lib.di_contains.restype = c_int32
@@ -158,26 +161,38 @@ _lib.di_contains.restype = c_int32
 _lib.di_service_count.argtypes = [c_void_p]
 _lib.di_service_count.restype = c_int64
 
+# Returns a library-owned string that must be freed with di_string_free().
 _lib.di_error_message.argtypes = []
-_lib.di_error_message.restype = c_char_p
+_lib.di_error_message.restype = c_void_p
 
 _lib.di_error_clear.argtypes = []
 _lib.di_error_clear.restype = None
 
-_lib.di_string_free.argtypes = [c_char_p]
+_lib.di_string_free.argtypes = [c_void_p]
 _lib.di_string_free.restype = None
 
 _lib.di_version.argtypes = []
 _lib.di_version.restype = c_char_p
 
 
+def _take_native_string(ptr: int | None) -> str | None:
+    """Decode a library-owned string and free it.
+
+    The native library transfers ownership of strings returned from
+    ``di_resolve_json`` and ``di_error_message``; they must be released
+    with ``di_string_free``. Returns None for a NULL pointer.
+    """
+    if not ptr:
+        return None
+    try:
+        return ctypes.string_at(ptr).decode("utf-8")
+    finally:
+        _lib.di_string_free(ptr)
+
+
 def _get_last_error() -> str | None:
     """Get the last error message from the native library."""
-    error_ptr = _lib.di_error_message()
-    if not error_ptr:
-        return None
-    error = error_ptr.decode("utf-8")
-    return error
+    return _take_native_string(_lib.di_error_message())
 
 
 def _clear_error() -> None:
@@ -384,16 +399,15 @@ class Container:
         _clear_error()
 
         type_name_bytes = type_name.encode("utf-8")
-        json_ptr = _lib.di_resolve_json(self._ptr, type_name_bytes)
+        json_str = _take_native_string(_lib.di_resolve_json(self._ptr, type_name_bytes))
 
-        if not json_ptr:
+        if json_str is None:
             error = _get_last_error()
             if error:
                 raise DIError(ErrorCode.NOT_FOUND, error)
             raise DIError(ErrorCode.NOT_FOUND, f"Service '{type_name}' not found")
 
         try:
-            json_str = json_ptr.decode("utf-8")
             return json.loads(json_str)
         except json.JSONDecodeError as e:
             raise DIError(

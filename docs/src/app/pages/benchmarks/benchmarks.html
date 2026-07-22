@@ -18,12 +18,12 @@
     <div class="performance-highlights mb-12">
       <h2 class="text-2xl font-bold text-white mb-6">
         <fa-icon [icon]="['fas', 'rocket']" class="mr-2 text-rust-500"></fa-icon>
-        Performance Highlights <span class="text-sm text-slate-400 font-normal ml-2">v0.2.1</span>
+        Performance Highlights <span class="text-sm text-slate-400 font-normal ml-2">v2.0.0</span>
       </h2>
       <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4">
         <div class="highlight-card">
           <div class="highlight-value">~9<span class="highlight-unit">ns</span></div>
-          <div class="highlight-label">Singleton Resolution</div>
+          <div class="highlight-label">Cached Resolution (hot path)</div>
           <div class="highlight-desc">~1ns from manual DI!</div>
         </div>
         <div class="highlight-card">
@@ -108,6 +108,16 @@
       </div>
     }
 
+    <!-- Sample Data Notice -->
+    @if (!benchmarkService.loading() && benchmarkService.usingSampleData()) {
+      <div class="bg-blue-500/10 border border-blue-500/30 rounded-lg p-4 mb-8">
+        <div class="flex items-center">
+          <fa-icon [icon]="['fas', 'info-circle']" class="text-blue-400 mr-3"></fa-icon>
+          <span class="text-blue-200">Showing bundled sample results (measured on v0.2.1, Dec 2025) — live benchmark data is unavailable.</span>
+        </div>
+      </div>
+    }
+
     <!-- Benchmark Data -->
     @if (!benchmarkService.loading()) {
       <!-- Stats Overview -->
@@ -127,7 +137,7 @@
             <fa-icon [icon]="['fas', 'code']" class="text-green-500"></fa-icon>
           </div>
           <div>
-            <div class="stat-value">{{ getLastCommit() || 'N/A' }}</div>
+            <div class="stat-value">{{ lastCommit() || 'N/A' }}</div>
             <div class="stat-label">Latest Commit</div>
           </div>
         </div>
@@ -137,7 +147,7 @@
             <fa-icon [icon]="['fas', 'clock-rotate-left']" class="text-blue-500"></fa-icon>
           </div>
           <div>
-            <div class="stat-value text-base">{{ getLastUpdate() || 'N/A' }}</div>
+            <div class="stat-value text-base">{{ lastUpdate() || 'N/A' }}</div>
             <div class="stat-label">Last Updated</div>
           </div>
         </div>
@@ -180,7 +190,7 @@
                   @if (benchmark.history.length >= 2) {
                     <svg class="sparkline" viewBox="0 0 100 30" preserveAspectRatio="none">
                       <polyline
-                        [attr.points]="getSparklinePoints(benchmark)"
+                        [attr.points]="sparklinePoints().get(benchmark.suite + '/' + benchmark.name) ?? ''"
                         fill="none"
                         stroke="currentColor"
                         stroke-width="2"
@@ -231,7 +241,7 @@
             <thead>
               <tr>
                 <th>Approach</th>
-                <th>Singleton Resolution</th>
+                <th>Cached Resolution (hot path)</th>
                 <th>Container Creation</th>
                 <th>4-Thread Concurrent</th>
                 <th>Notes</th>
@@ -347,7 +357,7 @@
               ~1ns from Manual DI
             </div>
             <p class="comparison-text">
-              At <strong class="text-white">~9ns</strong> per resolution, dependency-injector is <strong class="text-white">within 1ns</strong> of manual dependency injection while providing full runtime DI features.
+              At <strong class="text-white">~9ns</strong> per cached (hot-path) resolution, dependency-injector is <strong class="text-white">within 1ns</strong> of manual dependency injection while providing full runtime DI features.
             </p>
           </div>
 

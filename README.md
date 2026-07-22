@@ -22,14 +22,14 @@ Add to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-dependency-injector = "0.2"
+dependency-injector = "2"
 ```
 
 ### Optional Features
 
 ```toml
 [dependencies]
-dependency-injector = { version = "0.2", features = ["logging-json"] }
+dependency-injector = { version = "2", features = ["logging-json"] }
 ```
 
 | Feature | Description |
@@ -370,7 +370,7 @@ The library provides C-compatible FFI bindings for use from other languages:
 |----------|----------|---------|
 | **Go** | Native CGO | `ffi/go/` |
 | **Python** | ctypes | `ffi/python/` |
-| **Node.js** | ffi-napi | `ffi/nodejs/` |
+| **Node.js** | koffi | `ffi/nodejs/` |
 | **C#** | P/Invoke | `ffi/csharp/` |
 | **C/C++** | Header file | `ffi/dependency_injector.h` |
 
@@ -392,10 +392,12 @@ cargo rustc --release --features ffi --crate-type cdylib
 from dependency_injector import Container
 
 container = Container()
-container.singleton("config", {"database": "postgres://localhost"})
+container.register("Config", {"database": "postgres://localhost"})
 
-config = container.get("config")
-print(config)  # {"database": "postgres://localhost"}
+config = container.resolve("Config")
+print(config)  # {'database': 'postgres://localhost'}
+
+container.free()
 ```
 
 ### Quick Example (Go)
@@ -403,16 +405,20 @@ print(config)  # {"database": "postgres://localhost"}
 ```go
 package main
 
-import "github.com/pegasusheavy/dependency-injector/ffi/go/di"
+import (
+    "fmt"
+
+    "github.com/pegasusheavy/dependency-injector/ffi/go/di"
+)
 
 func main() {
     container := di.NewContainer()
     defer container.Free()
 
-    container.RegisterSingleton("config", `{"database": "postgres://localhost"}`)
+    container.RegisterJSON("Config", `{"database": "postgres://localhost"}`)
 
-    config, _ := container.Resolve("config")
-    fmt.Println(config)
+    config, _ := container.Resolve("Config")
+    fmt.Println(string(config))
 }
 ```
 

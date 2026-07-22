@@ -105,7 +105,10 @@ void di_container_free(DiContainer* container);
 /**
  * Create a child scope from a container.
  *
- * Child scopes inherit all services from the parent.
+ * Inheritance is a snapshot taken at creation time: the child receives a
+ * copy of the parent's services as they exist when the scope is created.
+ * Services registered in the parent afterwards are not visible to existing
+ * child scopes.
  *
  * @param container The parent container.
  * @return A pointer to the new scoped container, or NULL on failure.
@@ -170,7 +173,10 @@ DiResult di_resolve(DiContainer* container, const char* type_name);
  *
  * @param container The container to resolve from.
  * @param type_name The service type name to resolve.
- * @return A pointer to the null-terminated JSON string, or NULL if not found.
+ * @return A pointer to the null-terminated JSON string, or NULL on any
+ *         failure (service not found, invalid arguments, non-UTF-8 service
+ *         data, data containing null bytes, or an internal error). Call
+ *         di_error_message() to distinguish causes.
  *         Must be freed with di_string_free().
  */
 char* di_resolve_json(DiContainer* container, const char* type_name);

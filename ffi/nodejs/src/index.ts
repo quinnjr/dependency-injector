@@ -46,9 +46,10 @@ export enum ErrorCode {
 export class DIError extends Error {
   constructor(
     public readonly code: ErrorCode,
-    message: string
+    message: string,
+    cause?: unknown
   ) {
-    super(message);
+    super(message, cause === undefined ? undefined : { cause });
     this.name = "DIError";
   }
 
@@ -133,6 +134,10 @@ function findLibraryPath(): string {
 // Define koffi types
 const ContainerPtr = koffi.pointer("DiContainer", koffi.opaque());
 const ServicePtr = koffi.pointer("DiService", koffi.opaque());
+// Raw pointer to a Rust-allocated, NUL-terminated string. Strings returned
+// through this type are owned by the native library and MUST be released
+// with di_string_free() after decoding.
+const CharPtr = koffi.pointer("char");
 
 // Load the native library
 let lib: ReturnType<typeof koffi.load>;
@@ -165,21 +170,43 @@ const di_register_singleton_json = lib.func("di_register_singleton_json", "int",
   "str",
 ]);
 
-const di_resolve_json = lib.func("di_resolve_json", "str", [ContainerPtr, "str"]);
+const di_resolve_json = lib.func("di_resolve_json", CharPtr, [ContainerPtr, "str"]);
 const di_contains = lib.func("di_contains", "int", [ContainerPtr, "str"]);
 const di_service_count = lib.func("di_service_count", "int64", [ContainerPtr]);
 
-const di_error_message = lib.func("di_error_message", "str", []);
+const di_error_message = lib.func("di_error_message", CharPtr, []);
 const di_error_clear = lib.func("di_error_clear", "void", []);
-const di_string_free = lib.func("di_string_free", "void", ["str"]);
+const di_string_free = lib.func("di_string_free", "void", [CharPtr]);
 
 const di_version = lib.func("di_version", "str", []);
+
+/**
+ * Decode a library-owned C string and free the native allocation.
+ *
+ * The pointer comes from a native function that allocates with
+ * `CString::into_raw` (see ffi/dependency_injector.h); it must be released
+ * with `di_string_free()` exactly once. The free happens in a `finally`
+ * block so it runs even if decoding throws.
+ *
+ * @param ptr - Pointer returned by the native library, or null.
+ * @returns The decoded string, or `null` if the pointer was null.
+ */
+function takeNativeString(ptr: unknown): string | null {
+  if (!ptr) {
+    return null;
+  }
+  try {
+    return koffi.decode(ptr, "char", -1) as string;
+  } finally {
+    di_string_free(ptr);
+  }
+}
 
 /**
  * Get the last error message from the native library.
  */
 function getLastError(): string | null {
-  const error = di_error_message();
+  const error = takeNativeString(di_error_message());
   if (!error) {
     return null;
   }
@@ -363,8 +390,14 @@ export class Container {
     this.ensureNotFreed();
     clearError();
 
-    const json = di_resolve_json(this.ptr!, typeName);
-    if (!json) {
+    const json = takeNativeString(di_resolve_json(this.ptr!, typeName));
+    // Only a null pointer means "not found" — an empty string is a
+    // successfully resolved (if unparseable) value and falls through to
+    // JSON.parse, which reports it as a serialization error. An empty
+    // native string is unreachable via this binding's register() (which
+    // always produces non-empty JSON); the branch is defensive for
+    // containers populated directly through the C ABI.
+    if (json === null) {
       const error = getLastError();
       if (error) {
         throw new DIError(ErrorCode.NotFound, error);
@@ -377,7 +410,8 @@ export class Container {
     } catch (error) {
       throw new DIError(
         ErrorCode.SerializationError,
-        `Failed to deserialize service '${typeName}': ${error}`
+        `Failed to deserialize service '${typeName}': ${error}`,
+        error
       );
     }
   }

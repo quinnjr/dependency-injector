@@ -20,14 +20,13 @@
 //! The container is thread-safe. All FFI functions can be called from multiple threads.
 
 use std::any::Any;
-use std::collections::HashMap;
+use std::collections::{HashMap, hash_map::Entry};
 use std::ffi::{CStr, CString, c_char};
 use std::ptr;
 use std::sync::{Arc, RwLock};
 
 /// Opaque container handle for FFI
 pub struct DiContainer {
-    inner: crate::Container,
     /// Map of type names to their registered services (as raw bytes)
     services: RwLock<HashMap<String, Arc<dyn Any + Send + Sync>>>,
 }
@@ -69,8 +68,16 @@ thread_local! {
 }
 
 fn set_last_error(msg: impl Into<String>) {
+    // Replace control characters (incl. newlines) with spaces: type names
+    // are caller-supplied and error strings flow into host application
+    // logs verbatim, so this blocks log-forging via crafted names.
+    let sanitized: String = msg
+        .into()
+        .chars()
+        .map(|c| if c.is_control() { ' ' } else { c })
+        .collect();
     LAST_ERROR.with(|e| {
-        *e.borrow_mut() = Some(msg.into());
+        *e.borrow_mut() = Some(sanitized);
     });
 }
 
@@ -88,7 +95,6 @@ fn set_last_error(msg: impl Into<String>) {
 #[unsafe(no_mangle)]
 pub extern "C" fn di_container_new() -> *mut DiContainer {
     let container = Box::new(DiContainer {
-        inner: crate::Container::new(),
         services: RwLock::new(HashMap::new()),
     });
     Box::into_raw(container)
@@ -109,6 +115,11 @@ pub unsafe extern "C" fn di_container_free(container: *mut DiContainer) {
 
 /// Create a child scope from a container.
 ///
+/// Inheritance is a snapshot taken at creation time: the child receives a
+/// copy of the parent's services as they exist when the scope is created.
+/// Services registered in the parent afterwards are not visible to existing
+/// child scopes.
+///
 /// # Returns
 /// A pointer to the new scoped container, or NULL on failure.
 ///
@@ -124,13 +135,11 @@ pub unsafe extern "C" fn di_container_scope(container: *mut DiContainer) -> *mut
 
     // SAFETY: Caller guarantees container is valid
     let parent = unsafe { &*container };
-    let child_inner = parent.inner.scope();
 
     // Clone the services map for the child scope
     let services = parent.services.read().unwrap().clone();
 
     let child = Box::new(DiContainer {
-        inner: child_inner,
         services: RwLock::new(services),
     });
     Box::into_raw(child)
@@ -199,24 +208,20 @@ pub unsafe extern "C" fn di_register_singleton(
     // SAFETY: Caller guarantees container is valid
     let container = unsafe { &*container };
 
-    // Check if already registered
-    {
-        let services = container.services.read().unwrap();
-        if services.contains_key(&type_name_str) {
-            set_last_error(format!("Service '{}' is already registered", type_name_str));
-            return DiErrorCode::AlreadyRegistered;
+    // Check and insert atomically under a single write lock so two threads
+    // cannot both pass the existence check and silently overwrite each other.
+    let mut services = container.services.write().unwrap();
+    match services.entry(type_name_str) {
+        Entry::Occupied(entry) => {
+            set_last_error(format!("Service '{}' is already registered", entry.key()));
+            DiErrorCode::AlreadyRegistered
+        }
+        Entry::Vacant(entry) => {
+            let service_data: Arc<dyn Any + Send + Sync> = Arc::new(data_vec);
+            entry.insert(service_data);
+            DiErrorCode::Ok
         }
     }
-
-    // Store the service data
-    let service_data: Arc<dyn Any + Send + Sync> = Arc::new(data_vec);
-    container
-        .services
-        .write()
-        .unwrap()
-        .insert(type_name_str, service_data);
-
-    DiErrorCode::Ok
 }
 
 /// Register a singleton service with a JSON string.
@@ -357,8 +362,10 @@ pub unsafe extern "C" fn di_resolve(
 /// - `type_name` - The service type name to resolve
 ///
 /// # Returns
-/// A pointer to the null-terminated JSON string, or NULL if not found.
-/// The pointer must be freed with `di_string_free()`.
+/// A pointer to the null-terminated JSON string, or NULL on any failure
+/// (service not found, invalid arguments, non-UTF-8 service data, data
+/// containing null bytes, or an internal error). Call `di_error_message()`
+/// to distinguish causes. The pointer must be freed with `di_string_free()`.
 ///
 /// # Safety
 /// - `container` must be a valid container pointer
@@ -496,7 +503,8 @@ pub unsafe extern "C" fn di_service_data_len(service: *const DiService) -> usize
 ///
 /// # Returns
 /// Pointer to the null-terminated type name, or NULL on error.
-/// The pointer is valid until the service is freed.
+/// The returned string is a fresh allocation owned by the caller and must be
+/// freed with `di_string_free()`.
 ///
 /// # Safety
 /// - `service` must be a valid pointer to a `DiService` returned from `di_resolve`
@@ -608,6 +616,16 @@ pub unsafe extern "C" fn di_service_count(container: *const DiContainer) -> i64 
 mod tests {
     use super::*;
 
+    /// Run `f` against a fresh container, always freeing it afterwards.
+    fn with_container(f: impl FnOnce(*mut DiContainer)) {
+        let container = di_container_new();
+        assert!(!container.is_null());
+        f(container);
+        // SAFETY: `container` came from `di_container_new` and is freed
+        // exactly once, after `f` has finished using it.
+        unsafe { di_container_free(container) };
+    }
+
     #[test]
     fn test_container_lifecycle() {
         unsafe {
@@ -619,9 +637,7 @@ mod tests {
 
     #[test]
     fn test_register_and_resolve() {
-        unsafe {
-            let container = di_container_new();
-
+        with_container(|container| unsafe {
             let type_name = CString::new("TestService").unwrap();
             let data = b"hello world";
 
@@ -641,28 +657,23 @@ mod tests {
             assert_eq!(resolved_data, b"hello world");
 
             di_service_free(service);
-            di_container_free(container);
-        }
+        });
     }
 
     #[test]
     fn test_not_found() {
-        unsafe {
-            let container = di_container_new();
+        with_container(|container| unsafe {
             let type_name = CString::new("NonExistent").unwrap();
 
             let result = di_resolve(container, type_name.as_ptr());
             assert_eq!(result.code, DiErrorCode::NotFound);
             assert!(result.service.is_null());
-
-            di_container_free(container);
-        }
+        });
     }
 
     #[test]
     fn test_contains() {
-        unsafe {
-            let container = di_container_new();
+        with_container(|container| unsafe {
             let type_name = CString::new("TestService").unwrap();
 
             assert_eq!(di_contains(container, type_name.as_ptr()), 0);
@@ -671,9 +682,7 @@ mod tests {
             di_register_singleton(container, type_name.as_ptr(), data.as_ptr(), data.len());
 
             assert_eq!(di_contains(container, type_name.as_ptr()), 1);
-
-            di_container_free(container);
-        }
+        });
     }
 
     #[test]
@@ -694,5 +703,185 @@ mod tests {
             di_container_free(child);
             di_container_free(parent);
         }
+    }
+
+    #[test]
+    fn test_duplicate_registration() {
+        with_container(|container| unsafe {
+            let type_name = CString::new("Duplicate").unwrap();
+            let data = b"data";
+
+            let first =
+                di_register_singleton(container, type_name.as_ptr(), data.as_ptr(), data.len());
+            assert_eq!(first, DiErrorCode::Ok);
+
+            let second =
+                di_register_singleton(container, type_name.as_ptr(), data.as_ptr(), data.len());
+            assert_eq!(second, DiErrorCode::AlreadyRegistered);
+        });
+    }
+
+    #[test]
+    fn test_concurrent_duplicate_registration() {
+        // Regression test for the check-then-insert TOCTOU: registration is
+        // atomic under a single write lock, so of N threads racing to
+        // register the same name, exactly one must win per round.
+        struct SendPtr(*mut DiContainer);
+        // SAFETY: DiContainer's internals are RwLock-protected and all FFI
+        // functions are documented as thread-safe.
+        unsafe impl Send for SendPtr {}
+        unsafe impl Sync for SendPtr {}
+
+        const THREADS: usize = 8;
+        const ROUNDS: usize = 100;
+
+        let container = SendPtr(di_container_new());
+        let container = std::sync::Arc::new(container);
+
+        for round in 0..ROUNDS {
+            let barrier = std::sync::Arc::new(std::sync::Barrier::new(THREADS));
+            let name = std::sync::Arc::new(CString::new(format!("Svc{round}")).unwrap());
+
+            let handles: Vec<_> = (0..THREADS)
+                .map(|_| {
+                    let container = std::sync::Arc::clone(&container);
+                    let barrier = std::sync::Arc::clone(&barrier);
+                    let name = std::sync::Arc::clone(&name);
+                    std::thread::spawn(move || {
+                        let data = b"race";
+                        barrier.wait();
+                        unsafe {
+                            di_register_singleton(
+                                container.0,
+                                name.as_ptr(),
+                                data.as_ptr(),
+                                data.len(),
+                            )
+                        }
+                    })
+                })
+                .collect();
+
+            let results: Vec<_> = handles.into_iter().map(|h| h.join().unwrap()).collect();
+            let ok = results.iter().filter(|r| **r == DiErrorCode::Ok).count();
+            let dup = results
+                .iter()
+                .filter(|r| **r == DiErrorCode::AlreadyRegistered)
+                .count();
+            assert_eq!(ok, 1, "round {round}: exactly one registration must win");
+            assert_eq!(
+                dup,
+                THREADS - 1,
+                "round {round}: the rest must see AlreadyRegistered"
+            );
+        }
+
+        unsafe { di_container_free(container.0) };
+    }
+
+    #[test]
+    fn test_json_register_and_resolve() {
+        with_container(|container| unsafe {
+            let type_name = CString::new("JsonService").unwrap();
+            let json = CString::new("{\"name\":\"test\"}").unwrap();
+
+            let result = di_register_singleton_json(container, type_name.as_ptr(), json.as_ptr());
+            assert_eq!(result, DiErrorCode::Ok);
+
+            let resolved = di_resolve_json(container, type_name.as_ptr());
+            assert!(!resolved.is_null());
+            assert_eq!(
+                CStr::from_ptr(resolved).to_str().unwrap(),
+                "{\"name\":\"test\"}"
+            );
+            di_string_free(resolved);
+        });
+    }
+
+    #[test]
+    fn test_resolve_json_not_found() {
+        with_container(|container| unsafe {
+            let type_name = CString::new("Missing").unwrap();
+
+            di_error_clear();
+            let resolved = di_resolve_json(container, type_name.as_ptr());
+            assert!(resolved.is_null());
+
+            let error = di_error_message();
+            assert!(!error.is_null());
+            assert!(
+                CStr::from_ptr(error)
+                    .to_str()
+                    .unwrap()
+                    .contains("not found")
+            );
+            di_string_free(error);
+        });
+    }
+
+    #[test]
+    fn test_service_type_name() {
+        with_container(|container| unsafe {
+            let type_name = CString::new("NamedService").unwrap();
+            let data = b"data";
+
+            di_register_singleton(container, type_name.as_ptr(), data.as_ptr(), data.len());
+
+            let result = di_resolve(container, type_name.as_ptr());
+            assert_eq!(result.code, DiErrorCode::Ok);
+
+            let name = di_service_type_name(result.service);
+            assert!(!name.is_null());
+            assert_eq!(CStr::from_ptr(name).to_str().unwrap(), "NamedService");
+            di_string_free(name.cast_mut());
+
+            di_service_free(result.service);
+        });
+    }
+
+    #[test]
+    fn test_error_message_set_and_clear() {
+        with_container(|container| unsafe {
+            let type_name = CString::new("Missing").unwrap();
+
+            let result = di_resolve(container, type_name.as_ptr());
+            assert_eq!(result.code, DiErrorCode::NotFound);
+
+            let error = di_error_message();
+            assert!(!error.is_null());
+            di_string_free(error);
+
+            di_error_clear();
+            assert!(di_error_message().is_null());
+        });
+    }
+
+    #[test]
+    fn test_version() {
+        unsafe {
+            let version = di_version();
+            assert!(!version.is_null());
+            assert_eq!(
+                CStr::from_ptr(version).to_str().unwrap(),
+                env!("CARGO_PKG_VERSION")
+            );
+        }
+    }
+
+    #[test]
+    fn test_service_count() {
+        with_container(|container| unsafe {
+            assert_eq!(di_service_count(container), 0);
+
+            let first = CString::new("First").unwrap();
+            let second = CString::new("Second").unwrap();
+            let data = b"data";
+
+            di_register_singleton(container, first.as_ptr(), data.as_ptr(), data.len());
+            assert_eq!(di_service_count(container), 1);
+
+            di_register_singleton(container, second.as_ptr(), data.as_ptr(), data.len());
+            assert_eq!(di_service_count(container), 2);
+        });
     }
 }

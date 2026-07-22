@@ -5,6 +5,40 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.0.0] - 2026-07-21
+
+### Added
+- `Container::remove::<T>()` — removes a single service registration from the
+  current scope (documented in the README since 1.0.0, now implemented)
+- `typed::Require` trait — the `#[derive(TypedRequire)]` macro now generates
+  valid code (it previously referenced non-existent items and failed to
+  compile on any use)
+- `Resolvable` is now implemented for tuples mixing required (`Arc<T>`) and
+  optional (`Option<Arc<T>>`) dependencies, making `#[dep(optional)]` usable
+  alongside other dependencies in `#[derive(Service)]`
+
+### Fixed
+- Thread-local hot cache is now automatically invalidated when a container is
+  mutated (registration, `clear()`, `remove()`, batch registration, scope-pool
+  release). Previously `clear()` or re-registration could serve stale cached
+  services on the same thread.
+- `ProviderRegistration::singleton(value)` now actually registers the value
+  (was a silent no-op)
+- Python and Node.js FFI bindings no longer leak the native string returned by
+  every `resolve()` and error lookup. As part of this, an empty-string payload
+  is now reported as a serialization error rather than "not found"
+  (only a NULL pointer means not-found)
+- FFI `di_register_singleton` duplicate check is now atomic (a concurrent
+  duplicate registration can no longer silently overwrite)
+
+### Changed
+- **BREAKING**: `ProviderRegistration.register_fn` changed from
+  `fn(&Container)` to `Arc<dyn Fn(&Container) + Send + Sync>` so registrations
+  can capture the registered value. Code constructing `ProviderRegistration`
+  literally or using the field as a plain `fn` pointer must be updated; the
+  `provider!` macro and `(reg.register_fn)(&container)` call sites are
+  unaffected. This is the change that makes this release 2.0.0.
+
 ## [0.2.2] - 2025-12-28
 
 ### Highlights
@@ -116,7 +150,7 @@ Verified with dhat and Valgrind:
 - `ScopePool` for pre-allocated scope reuse in high-throughput scenarios
 - `FrozenStorage` with perfect hashing for static containers
 - Thread-local hot cache for frequently accessed services
-- Fluent batch registration API (`container.batch().singleton(A).done()`)
+- Fluent batch registration API (`container.register_batch().singleton(A).done()`)
 - Deep parent chain resolution for multi-level hierarchies
 - `perfect-hash` feature flag for frozen container support
 - `logging`, `logging-json`, and `logging-pretty` feature flags

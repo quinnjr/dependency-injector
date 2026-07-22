@@ -52,8 +52,10 @@
 
       <h2 id="scoped-container"><fa-icon [icon]="['fas', 'layer-group']" class="mr-2"></fa-icon>ScopedContainer</h2>
       <p>
-        A child container that inherits services from its parent. Created via <code>Container::scope()</code>.
-        Has the same API as <code>Container</code>.
+        A container with an associated scope identifier, useful for request- or session-scoped
+        services. Created via <code>ScopedContainer::from_parent(&amp;parent)</code> (or
+        <code>ScopedContainer::new()</code> for a root scope). Note that
+        <code>Container::scope()</code> itself returns a plain child <code>Container</code>.
       </p>
 
       <h2 id="di-error"><fa-icon [icon]="['fas', 'exclamation-circle']" class="mr-2"></fa-icon>DiError</h2>

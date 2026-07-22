@@ -281,6 +281,9 @@ def main():
             else:
                 ManualContainer()
 
+    # NOTE: the library benchmarks' 5% branch is intentionally per-library
+    # (create-only vs create+register) because scope APIs differ; see each
+    # mixed_* function's inline comment for the deliberate deviation.
     def mixed_dict():
         for i in range(100):
             op = i % 20
@@ -300,7 +303,9 @@ def main():
             elif op < 19:
                 di_container.database()
             else:
-                di_container.config()
+                # 5% - instantiate a fresh declarative container (scope
+                # analogue, mirrors peers' new-container work)
+                DIContainer()
 
     def mixed_google():
         for i in range(100):
@@ -310,7 +315,9 @@ def main():
             elif op < 19:
                 google_injector.get(Database)
             else:
-                google_injector.get(Config)
+                # 5% - create a child injector (injector's real scope
+                # mechanism)
+                google_injector.create_child_injector()
 
     def mixed_punq():
         for i in range(100):
@@ -320,7 +327,11 @@ def main():
             elif op < 19:
                 punq_container.resolve(Database)
             else:
-                punq_container.resolve(Config)
+                # 5% - punq (0.7.x) has no child-scope API, so construct a
+                # fresh container and register a service into it, mirroring
+                # the dict peer's work
+                scope = punq.Container()
+                scope.register(Config, instance=Config())
 
     mixed_results = [
         benchmark("manual_di", mixed_manual, iterations=10000),
