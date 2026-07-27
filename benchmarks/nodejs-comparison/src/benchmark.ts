@@ -156,9 +156,22 @@ function createAwilixContainer() {
 // Simple benchmark function
 // =============================================================================
 
+// When DI_BENCH_SMOKE is set to a non-empty value, every benchmark runs a
+// token number of iterations. The resulting timings are meaningless as
+// measurements -- the point is to execute every code path cheaply so CI can
+// catch crashes, import errors and API drift without spending minutes.
+const SMOKE = Boolean(process.env.DI_BENCH_SMOKE);
+const SMOKE_ITERATIONS = 2;
+const SMOKE_WARMUP = 1;
+
 function benchmark(name: string, fn: () => void, iterations = 100000): { name: string; opsPerSec: number; avgNs: number } {
+  const warmup = SMOKE ? SMOKE_WARMUP : 1000;
+  if (SMOKE) {
+    iterations = SMOKE_ITERATIONS;
+  }
+
   // Warm up
-  for (let i = 0; i < 1000; i++) {
+  for (let i = 0; i < warmup; i++) {
     fn();
   }
 

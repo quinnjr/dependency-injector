@@ -489,3 +489,81 @@ jobs:
       - name: Race-check the concurrency benchmarks
         working-directory: benchmarks/go-comparison
         run: go test -run=XXX -bench=BenchmarkConcurrentReads -benchtime=100x -race ./...
+
+  bench-node:
+    name: Node Benchmarks (smoke)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: pnpm/action-setup@v6
+        with:
+          version: 10
+
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 22
+
+      - name: Install dependencies
+        working-directory: benchmarks/nodejs-comparison
+        run: pnpm install --frozen-lockfile
+
+      - name: Typecheck
+        working-directory: benchmarks/nodejs-comparison
+        run: pnpm exec tsc --noEmit -p tsconfig.json
+
+      # DI_BENCH_SMOKE collapses every benchmark to a couple of iterations, so
+      # this executes each code path in about a second. The printed timings are
+      # meaningless -- the gate is "does it still run", not "how fast".
+      - name: Smoke-run benchmarks
+        working-directory: benchmarks/nodejs-comparison
+        env:
+          DI_BENCH_SMOKE: '1'
+        run: pnpm bench
+
+  bench-python:
+    name: Python Benchmarks (smoke)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+
+      - name: Install benchmark dependencies
+        run: python -m pip install --quiet dependency-injector injector punq
+
+      - name: Syntax check
+        run: python -m compileall -q benchmarks/python-comparison/benchmark.py
+
+      # See the note on bench-node: smoke mode, not a measurement.
+      - name: Smoke-run benchmarks
+        working-directory: benchmarks/python-comparison
+        env:
+          DI_BENCH_SMOKE: '1'
+        run: python benchmark.py
+
+  bench-csharp:
+    name: C# Benchmarks (smoke)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: actions/setup-dotnet@v5
+        with:
+          dotnet-version: '8.0.x'
+
+      - name: Build
+        working-directory: benchmarks/csharp-comparison
+        run: dotnet build --configuration Release
+
+      # See the note on bench-node: smoke mode, not a measurement.
+      - name: Smoke-run benchmarks
+        working-directory: benchmarks/csharp-comparison
+        env:
+          DI_BENCH_SMOKE: '1'
+        run: dotnet run --configuration Release --no-build

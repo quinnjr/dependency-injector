@@ -10,6 +10,7 @@ Compares:
 - punq (lightweight DI)
 """
 
+import os
 import time
 import sys
 from typing import Optional
@@ -137,10 +138,23 @@ def create_punq_container() -> punq.Container:
 # Benchmark utilities
 # =============================================================================
 
+# When DI_BENCH_SMOKE is set to a non-empty value, every benchmark runs a
+# token number of iterations. The resulting timings are meaningless as
+# measurements -- the point is to execute every code path cheaply so CI can
+# catch crashes, import errors and API drift without spending minutes.
+SMOKE = bool(os.environ.get("DI_BENCH_SMOKE"))
+SMOKE_ITERATIONS = 2
+SMOKE_WARMUP = 1
+
+
 def benchmark(name: str, fn, iterations: int = 100000) -> dict:
     """Run a benchmark and return results."""
+    warmup = SMOKE_WARMUP if SMOKE else 1000
+    if SMOKE:
+        iterations = SMOKE_ITERATIONS
+
     # Warm up
-    for _ in range(1000):
+    for _ in range(warmup):
         fn()
 
     # Benchmark

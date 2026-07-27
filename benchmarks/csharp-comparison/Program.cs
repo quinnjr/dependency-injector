@@ -98,10 +98,25 @@ public class BenchmarkResult
 
 public static class Benchmark
 {
+    // When DI_BENCH_SMOKE is set to a non-empty value, every benchmark runs a
+    // token number of iterations. The resulting timings are meaningless as
+    // measurements -- the point is to execute every code path cheaply so CI can
+    // catch crashes, build errors and API drift without spending minutes.
+    private static readonly bool Smoke =
+        !string.IsNullOrEmpty(Environment.GetEnvironmentVariable("DI_BENCH_SMOKE"));
+    private const int SmokeIterations = 2;
+    private const int SmokeWarmup = 1;
+
     public static BenchmarkResult Run(string name, Action action, int iterations = 100000)
     {
+        var warmup = Smoke ? SmokeWarmup : 1000;
+        if (Smoke)
+        {
+            iterations = SmokeIterations;
+        }
+
         // Warm up
-        for (int i = 0; i < 1000; i++)
+        for (int i = 0; i < warmup; i++)
         {
             action();
         }
