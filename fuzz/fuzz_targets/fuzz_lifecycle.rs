@@ -163,10 +163,16 @@ fuzz_target!(|ops: Vec<LifecycleOp>| {
             }
             LifecycleOp::TryRegisterAfterLock(svc) => {
                 if is_locked {
-                    // This should panic, but we catch it
+                    // Registering on a locked container panics by design. libfuzzer's
+                    // panic hook aborts the process before catch_unwind can intercept,
+                    // so swap in a silent hook for this intentional panic and restore
+                    // the fuzzer's hook afterwards.
+                    let fuzzer_hook = std::panic::take_hook();
+                    std::panic::set_hook(Box::new(|_| {}));
                     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                         container.singleton(svc);
                     }));
+                    std::panic::set_hook(fuzzer_hook);
                     assert!(result.is_err(), "Should panic when registering after lock");
                 }
             }
