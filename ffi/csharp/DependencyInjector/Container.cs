@@ -29,7 +29,12 @@ namespace DependencyInjector
             DiErrorCode.AlreadyRegistered => "Service already registered",
             DiErrorCode.InternalError => "Internal error",
             DiErrorCode.SerializationError => "Serialization error",
-            _ => $"Unknown error: {code}"
+            DiErrorCode.Locked => "Container is locked - registration is not allowed",
+            // Codes added to the native library after this binding was built
+            // arrive here as an unmapped enum value. C# permits any underlying
+            // integer in an enum, so this is a plain fallthrough rather than a
+            // cast or switch failure.
+            _ => $"Unknown error: {(int)code}"
         };
     }
 
@@ -112,12 +117,28 @@ namespace DependencyInjector
         /// <summary>
         /// Gets the number of registered services.
         /// </summary>
+        /// <remarks>
+        /// The native library returns -1 to signal an error (a panic caught at the
+        /// FFI boundary); that sentinel is thrown rather than returned as a count,
+        /// so this property never reports a negative number of services.
+        /// </remarks>
+        /// <exception cref="DIException">Thrown if the native call fails.</exception>
         public long ServiceCount
         {
             get
             {
                 ThrowIfDisposed();
-                return NativeBindings.di_service_count(_handle);
+                NativeBindings.di_error_clear();
+
+                var count = NativeBindings.di_service_count(_handle);
+                if (count < 0)
+                {
+                    var errorMsg = GetLastError();
+                    throw new DIException(
+                        DiErrorCode.InternalError,
+                        errorMsg ?? "Failed to query the container's service count");
+                }
+                return count;
             }
         }
 
@@ -127,7 +148,13 @@ namespace DependencyInjector
         /// <typeparam name="T">The service type.</typeparam>
         /// <param name="typeName">The type name identifier.</param>
         /// <param name="instance">The service instance.</param>
-        /// <exception cref="DIException">Thrown if registration fails.</exception>
+        /// <exception cref="ObjectDisposedException">Thrown if the container has been disposed.</exception>
+        /// <exception cref="DIException">
+        /// Thrown if registration fails. The exception's
+        /// <see cref="DIException.ErrorCode"/> identifies the cause, including
+        /// <see cref="DiErrorCode.Locked"/> when the container has been locked
+        /// with <see cref="Lock"/>.
+        /// </exception>
         public void Register<T>(string typeName, T instance)
         {
             ThrowIfDisposed();
@@ -148,7 +175,13 @@ namespace DependencyInjector
         /// </summary>
         /// <typeparam name="T">The service type.</typeparam>
         /// <param name="instance">The service instance.</param>
-        /// <exception cref="DIException">Thrown if registration fails.</exception>
+        /// <exception cref="ObjectDisposedException">Thrown if the container has been disposed.</exception>
+        /// <exception cref="DIException">
+        /// Thrown if registration fails. The exception's
+        /// <see cref="DIException.ErrorCode"/> identifies the cause, including
+        /// <see cref="DiErrorCode.Locked"/> when the container has been locked
+        /// with <see cref="Lock"/>.
+        /// </exception>
         public void Register<T>(T instance)
         {
             var typeName = typeof(T).FullName ?? typeof(T).Name;
@@ -254,12 +287,31 @@ namespace DependencyInjector
         /// <summary>
         /// Checks if a service is registered by type name.
         /// </summary>
+        /// <remarks>
+        /// The native <c>di_contains</c> returns 1 (registered), 0 (not
+        /// registered), or -1 (internal error or invalid argument). A negative
+        /// result is surfaced as a <see cref="DIException"/> rather than being
+        /// collapsed into <c>false</c>, so a genuine failure is never mistaken
+        /// for "not registered".
+        /// </remarks>
         /// <param name="typeName">The type name identifier.</param>
         /// <returns>True if the service is registered, false otherwise.</returns>
+        /// <exception cref="ObjectDisposedException">Thrown if the container has been disposed.</exception>
+        /// <exception cref="DIException">Thrown if the native call reports an error (-1).</exception>
         public bool Contains(string typeName)
         {
             ThrowIfDisposed();
-            return NativeBindings.di_contains(_handle, typeName) == 1;
+            NativeBindings.di_error_clear();
+
+            var result = NativeBindings.di_contains(_handle, typeName);
+            if (result < 0)
+            {
+                var errorMsg = GetLastError();
+                throw new DIException(
+                    DiErrorCode.InternalError,
+                    errorMsg ?? $"Failed to check whether service '{typeName}' is registered");
+            }
+            return result == 1;
         }
 
         /// <summary>
@@ -267,10 +319,124 @@ namespace DependencyInjector
         /// </summary>
         /// <typeparam name="T">The service type.</typeparam>
         /// <returns>True if the service is registered, false otherwise.</returns>
+        /// <exception cref="ObjectDisposedException">Thrown if the container has been disposed.</exception>
+        /// <exception cref="DIException">Thrown if the native call reports an error (-1).</exception>
         public bool Contains<T>()
         {
             var typeName = typeof(T).FullName ?? typeof(T).Name;
             return Contains(typeName);
+        }
+
+        /// <summary>
+        /// Removes a registered service by type name.
+        /// </summary>
+        /// <remarks>
+        /// Removal is permitted on a locked container: <see cref="Lock"/>
+        /// blocks registration only.
+        /// </remarks>
+        /// <param name="typeName">The type name identifier.</param>
+        /// <returns>True if the service was removed, false if it was not registered.</returns>
+        /// <exception cref="ObjectDisposedException">Thrown if the container has been disposed.</exception>
+        /// <exception cref="DIException">Thrown if removal fails for any reason other than the service being absent.</exception>
+        public bool Remove(string typeName)
+        {
+            ThrowIfDisposed();
+            NativeBindings.di_error_clear();
+
+            var result = NativeBindings.di_remove(_handle, typeName);
+            return result switch
+            {
+                DiErrorCode.Ok => true,
+                DiErrorCode.NotFound => false,
+                _ => throw new DIException(result, GetLastError())
+            };
+        }
+
+        /// <summary>
+        /// Removes a registered service using the type's full name as the identifier.
+        /// </summary>
+        /// <typeparam name="T">The service type.</typeparam>
+        /// <returns>True if the service was removed, false if it was not registered.</returns>
+        /// <exception cref="ObjectDisposedException">Thrown if the container has been disposed.</exception>
+        /// <exception cref="DIException">Thrown if removal fails for any reason other than the service being absent.</exception>
+        public bool Remove<T>()
+        {
+            var typeName = typeof(T).FullName ?? typeof(T).Name;
+            return Remove(typeName);
+        }
+
+        /// <summary>
+        /// Removes all registered services from this container.
+        /// </summary>
+        /// <remarks>
+        /// Clearing is permitted on a locked container: <see cref="Lock"/>
+        /// blocks registration only.
+        /// </remarks>
+        /// <exception cref="ObjectDisposedException">Thrown if the container has been disposed.</exception>
+        /// <exception cref="DIException">Thrown if the native call reports a non-success code.</exception>
+        public void Clear()
+        {
+            ThrowIfDisposed();
+            NativeBindings.di_error_clear();
+
+            var result = NativeBindings.di_clear(_handle);
+            if (result != DiErrorCode.Ok)
+            {
+                throw new DIException(result, GetLastError());
+            }
+        }
+
+        /// <summary>
+        /// Locks this container to prevent further registrations.
+        /// </summary>
+        /// <remarks>
+        /// <para>
+        /// Locking blocks registration only. Once locked, <see cref="Register{T}(string, T)"/>
+        /// and <see cref="Register{T}(T)"/> throw a <see cref="DIException"/> with
+        /// <see cref="DiErrorCode.Locked"/>, while <see cref="Remove(string)"/> and
+        /// <see cref="Clear"/> remain permitted.
+        /// </para>
+        /// <para>
+        /// There is no unlock. Child containers created with <see cref="Scope"/>
+        /// start unlocked regardless of this container's lock state.
+        /// </para>
+        /// </remarks>
+        /// <exception cref="ObjectDisposedException">Thrown if the container has been disposed.</exception>
+        public void Lock()
+        {
+            ThrowIfDisposed();
+            NativeBindings.di_lock(_handle);
+        }
+
+        /// <summary>
+        /// Gets a value indicating whether this container is locked against registration.
+        /// </summary>
+        /// <remarks>
+        /// The native <c>di_is_locked</c> returns 1 (locked), 0 (unlocked), or
+        /// -1 (internal error or invalid argument). A negative result is
+        /// surfaced as a <see cref="DIException"/> rather than being collapsed
+        /// into <c>false</c>.
+        /// </remarks>
+        /// <value>True if the container is locked, false otherwise.</value>
+        /// <exception cref="ObjectDisposedException">Thrown if the container has been disposed.</exception>
+        /// <exception cref="DIException">Thrown if the native call reports an error (-1).</exception>
+        public bool IsLocked
+        {
+            get
+            {
+                ThrowIfDisposed();
+                NativeBindings.di_error_clear();
+
+                var result = NativeBindings.di_is_locked(_handle);
+                if (result < 0)
+                {
+                    var errorMsg = GetLastError();
+                    throw new DIException(
+                        DiErrorCode.InternalError,
+                        errorMsg ?? "Failed to query the container's lock state");
+                }
+                return result == 1;
+            }
         }
 
         /// <summary>

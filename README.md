@@ -205,6 +205,8 @@ fn main() {
 | `#[inject(optional)]` | `Option<Arc<T>>` | Optional dependency - `None` if not registered |
 | (none) | Any type with `Default` | Uses `Default::default()` |
 
+See also the [compile-time typed builder guide](https://pegasusheavy.github.io/dependency-injector/docs/guide) on the docs site for fully compile-time-checked registration with `TypedBuilder`.
+
 ## Framework Integration
 
 ### With Armature
@@ -213,7 +215,6 @@ fn main() {
 
 ```rust
 use armature::prelude::*;
-use dependency_injector::Container;
 
 #[injectable]
 #[derive(Clone)]
@@ -224,15 +225,6 @@ struct UserController {
     db: Arc<Database>,
 }
 
-#[controller]
-impl UserController {
-    #[get("/users")]
-    async fn get_users(&self) -> Result<Json<Vec<User>>, Error> {
-        let users = self.db.query_users().await?;
-        Ok(Json(users))
-    }
-}
-
 #[module]
 struct AppModule {
     #[controllers]
@@ -240,14 +232,11 @@ struct AppModule {
     #[providers]
     providers: (Database,),
 }
-
-#[tokio::main]
-async fn main() -> Result<(), Error> {
-    Application::create(AppModule)
-        .listen("0.0.0.0:3000")
-        .await
-}
 ```
+
+> **Note**: This snippet is illustrative only. The full, working example lives in — and is
+> maintained and tested by — the [Armature repository](https://github.com/pegasusheavy/armature);
+> it is not compiled as part of this crate.
 
 ## API Reference
 

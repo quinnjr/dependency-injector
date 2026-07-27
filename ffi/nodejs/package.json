@@ -1,10 +1,17 @@
 {
   "name": "@pegasusheavy/dependency-injector",
-  "version": "0.2.2",
+  "version": "2.0.0",
   "description": "Node.js bindings for the high-performance Rust dependency injection container",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
   "type": "module",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    },
+    "./package.json": "./package.json"
+  },
   "packageManager": "pnpm@10.0.0",
   "scripts": {
     "preinstall": "npx only-allow pnpm",

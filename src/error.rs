@@ -7,7 +7,16 @@ use thiserror::Error;
 #[derive(Error, Debug)]
 pub enum DiError {
     /// Service was not found in the container
-    #[error("Service not found: {type_name}")]
+    ///
+    /// The container stores services by [`TypeId`] only, so this error can
+    /// name the missing type but not the registered ones. Call
+    /// `Container::debug_registrations()` on the resolving container to log
+    /// what is actually registered in each scope of the chain.
+    #[error(
+        "Service not found: {type_name} (not registered in this scope chain; \
+         was it registered in a different scope, or removed by clear()? \
+         Container::debug_registrations() lists what is registered)"
+    )]
     NotFound {
         type_name: &'static str,
         type_id: TypeId,
@@ -99,3 +108,36 @@ impl Clone for DiError {
 
 /// Result type alias for DI operations
 pub type Result<T> = std::result::Result<T, DiError>;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[allow(dead_code)]
+    struct MissingService;
+
+    #[test]
+    fn test_not_found_message_contains_type_name_and_hint() {
+        let err = DiError::not_found::<MissingService>();
+        let message = err.to_string();
+
+        // Names the missing type
+        assert!(message.contains("MissingService"));
+        // Explains the likely causes
+        assert!(message.contains("different scope"));
+        assert!(message.contains("clear()"));
+        // Points at the diagnostic helper
+        assert!(message.contains("Container::debug_registrations()"));
+    }
+
+    #[test]
+    fn test_not_found_carries_type_id() {
+        let err = DiError::not_found::<MissingService>();
+        match err {
+            DiError::NotFound { type_id, .. } => {
+                assert_eq!(type_id, TypeId::of::<MissingService>());
+            }
+            other => panic!("expected NotFound, got: {other}"),
+        }
+    }
+}

@@ -102,7 +102,33 @@ var config Config
 request.ResolveJSON("Config", &config) // Works!
 
 // Parent cannot access child services
-root.Contains("RequestID") // false
+found, err := root.Contains("RequestID") // false, nil
+```
+
+## Locking
+
+Lock a container once startup registration is finished. Locking blocks
+registration only — removal and clearing stay permitted, and child scopes
+created with `Scope()` start unlocked.
+
+```go
+container := di.NewContainer()
+defer container.Free()
+
+container.RegisterValue("Config", config)
+container.Lock()
+
+// Registration is refused from here on
+err := container.RegisterValue("Late", late)
+if errors.Is(err, di.ErrLocked) {
+    // container is locked
+}
+
+// Removal and clearing still work
+removed, _ := container.Remove("Config") // true, nil
+container.Clear()
+
+locked, _ := container.IsLocked() // true, nil (there is no unlock)
 ```
 
 ## API Reference
@@ -134,13 +160,30 @@ err := container.ResolveJSON("Key", &target)
 // Try resolve (returns nil if not found, no error)
 data := container.TryResolve("Key")
 
-// Check existence
-exists := container.Contains("Key")
+// Check existence. The native di_contains returns -1 on an internal error or
+// invalid argument; that case is reported as a non-nil error instead of being
+// collapsed into false, so always check err before trusting exists.
+exists, err := container.Contains("Key")
+
+// Remove a single service. removed is false (with a nil error) when no
+// service was registered under that name.
+removed, err := container.Remove("Key")
+
+// Remove every registered service
+err := container.Clear()
+
+// Prevent further registrations. Removal and clearing remain permitted and
+// there is no unlock.
+err := container.Lock()
+
+// Check the lock state. As with Contains, the -1 error case is surfaced as a
+// non-nil error rather than collapsed into false.
+locked, err := container.IsLocked()
 
 // Get service count
 count := container.ServiceCount()
 
-// Create child scope
+// Create child scope (always starts unlocked)
 child, err := container.Scope()
 
 // Free resources (also called by finalizer)
@@ -164,6 +207,8 @@ if err != nil {
             // Handle not found
         case di.AlreadyRegistered:
             // Handle duplicate
+        case di.Locked:
+            // Handle registration on a locked container
         }
     }
 }
@@ -171,6 +216,9 @@ if err != nil {
 // Or use sentinel errors
 if errors.Is(err, di.ErrNotFound) {
     // Handle not found
+}
+if errors.Is(err, di.ErrLocked) {
+    // Registration was refused because the container is locked
 }
 ```
 
@@ -184,6 +232,10 @@ if errors.Is(err, di.ErrNotFound) {
 | 3 | `AlreadyRegistered` | Service already exists |
 | 4 | `InternalError` | Internal error |
 | 5 | `SerializationError` | JSON serialization failed |
+| 6 | `Locked` | Container is locked - registration is not allowed |
+
+Unrecognized codes from a newer native library are reported as
+`unknown error code: N` rather than being mapped onto a known code.
 
 ## Running Tests
 

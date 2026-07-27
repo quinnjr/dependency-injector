@@ -13,6 +13,13 @@
  *
  * The container is thread-safe. All functions can be called from multiple threads.
  *
+ * ## Panic Safety
+ *
+ * Panics inside the library are caught at the FFI boundary and never unwind
+ * into the caller. When a panic occurs, the function returns its documented
+ * error value (NULL, an error code, -1, or 0 depending on the function) and
+ * the panic message is surfaced via di_error_message().
+ *
  * ## Example (C)
  *
  * ```c
@@ -73,6 +80,8 @@ typedef enum DiErrorCode {
     DI_INTERNAL_ERROR = 4,
     /** Serialization/deserialization error */
     DI_SERIALIZATION_ERROR = 5,
+    /** Container is locked - registration is not allowed */
+    DI_LOCKED = 6,
 } DiErrorCode;
 
 /**
@@ -108,7 +117,8 @@ void di_container_free(DiContainer* container);
  * Inheritance is a snapshot taken at creation time: the child receives a
  * copy of the parent's services as they exist when the scope is created.
  * Services registered in the parent afterwards are not visible to existing
- * child scopes.
+ * child scopes. The child starts unlocked regardless of the parent's lock
+ * state, matching the core container's scoping semantics.
  *
  * @param container The parent container.
  * @return A pointer to the new scoped container, or NULL on failure.
@@ -127,7 +137,8 @@ DiContainer* di_container_scope(DiContainer* container);
  * @param type_name A unique string identifier for this service type (null-terminated).
  * @param data Pointer to the service data bytes.
  * @param data_len Length of the data in bytes.
- * @return Error code indicating success or failure.
+ * @return Error code indicating success or failure. Returns DI_LOCKED if the
+ *         container has been locked with di_lock().
  */
 DiErrorCode di_register_singleton(
     DiContainer* container,
@@ -144,13 +155,73 @@ DiErrorCode di_register_singleton(
  * @param container The container to register in.
  * @param type_name A unique string identifier for this service type.
  * @param json_data JSON-serialized service data (null-terminated).
- * @return Error code indicating success or failure.
+ * @return Error code indicating success or failure. Returns DI_LOCKED if the
+ *         container has been locked with di_lock().
  */
 DiErrorCode di_register_singleton_json(
     DiContainer* container,
     const char* type_name,
     const char* json_data
 );
+
+/* ============================================================================
+ * Service Removal and Locking
+ * ============================================================================ */
+
+/**
+ * Remove a registered service by type name.
+ *
+ * Matching the core container's semantics, removal is permitted on a locked
+ * container: locking prevents new registrations only.
+ *
+ * @param container The container to remove from.
+ * @param type_name The service type name to remove.
+ * @return DI_OK if the service was removed, DI_NOT_FOUND if no service with
+ *         that name is registered (with the last error set), or
+ *         DI_INVALID_ARGUMENT for a null container, null type name, or a
+ *         type name that is not valid UTF-8.
+ */
+DiErrorCode di_remove(DiContainer* container, const char* type_name);
+
+/**
+ * Remove all registered services from a container.
+ *
+ * Matching the core container's semantics, clearing is permitted on a locked
+ * container: locking prevents new registrations only.
+ *
+ * @param container The container to clear.
+ * @return DI_OK on success, or DI_INVALID_ARGUMENT if the container is null.
+ */
+DiErrorCode di_clear(DiContainer* container);
+
+/**
+ * Lock a container to prevent further registrations.
+ *
+ * Once locked, di_register_singleton() and di_register_singleton_json()
+ * return DI_LOCKED. Removal (di_remove()) and clearing (di_clear()) remain
+ * permitted, matching the core container's semantics: locking blocks
+ * registration only. There is no unlock. Child scopes created with
+ * di_container_scope() start unlocked.
+ *
+ * A null container is recorded as an error (see di_error_message()) and
+ * otherwise ignored.
+ *
+ * @param container The container to lock.
+ */
+void di_lock(DiContainer* container);
+
+/**
+ * Check whether a container is locked.
+ *
+ * @param container The container to query.
+ * @return 1 if the container is locked, 0 if it is not, -1 on error.
+ *         A negative return (-1) signals an internal error or invalid
+ *         argument - consult di_error_message() - and callers should not
+ *         collapse it into "false". The Python, Node.js, Go, and C# bindings
+ *         all surface the -1 case as an error rather than folding it into a
+ *         boolean; any new binding should do the same.
+ */
+int32_t di_is_locked(const DiContainer* container);
 
 /* ============================================================================
  * Service Resolution
@@ -187,6 +258,10 @@ char* di_resolve_json(DiContainer* container, const char* type_name);
  * @param container The container to check.
  * @param type_name The service type name to check.
  * @return 1 if registered, 0 if not, -1 on error.
+ *         A negative return (-1) signals an internal error or invalid
+ *         argument - consult di_error_message() - and callers should not
+ *         collapse it into "false". The Python, Node.js, Go, and C# bindings
+ *         all raise/throw on -1 rather than reporting "not registered".
  */
 int32_t di_contains(DiContainer* container, const char* type_name);
 

@@ -7,7 +7,7 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: 'Version tag (e.g., v0.2.2)'
+        description: 'Version tag (e.g., v2.0.0)'
         required: true
 
 permissions:
@@ -109,14 +109,25 @@ jobs:
           done
           ls -la release/
 
+      - name: Generate SHA256SUMS
+        run: |
+          (cd release && sha256sum * > SHA256SUMS)
+          cat release/SHA256SUMS
+
       - name: Get version
         id: version
+        env:
+          # Interpolated via env rather than directly in the script so
+          # attacker-controllable values cannot inject shell commands.
+          EVENT_NAME: ${{ github.event_name }}
+          INPUT_VERSION: ${{ github.event.inputs.version }}
         run: |
-          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
-            echo "version=${{ github.event.inputs.version }}" >> $GITHUB_OUTPUT
+          if [ "$EVENT_NAME" = "workflow_dispatch" ]; then
+            VERSION="$INPUT_VERSION"
           else
-            echo "version=${GITHUB_REF#refs/tags/}" >> $GITHUB_OUTPUT
+            VERSION="${GITHUB_REF#refs/tags/}"
           fi
+          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
 
       - name: Create or update release
         uses: softprops/action-gh-release@v3

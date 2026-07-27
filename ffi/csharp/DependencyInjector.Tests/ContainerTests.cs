@@ -262,6 +262,187 @@ public class ContainerTests
         Assert.Equal(1, dict["one"]);
         Assert.Equal(2, dict["two"]);
     }
+
+    [Fact]
+    public void Remove_RegisteredService_RoundTrips()
+    {
+        using var container = new Container();
+
+        container.Register("Config", new Config(true, 8080, "localhost"));
+        Assert.True(container.Contains("Config"));
+        Assert.Equal(1, container.ServiceCount);
+
+        Assert.True(container.Remove("Config"));
+
+        Assert.False(container.Contains("Config"));
+        Assert.Equal(0, container.ServiceCount);
+
+        // The name is free again after removal.
+        container.Register("Config", new Config(false, 9090, "other"));
+        Assert.Equal(9090, container.Resolve<Config>("Config").Port);
+    }
+
+    [Fact]
+    public void Remove_UnregisteredService_ReturnsFalse()
+    {
+        using var container = new Container();
+
+        Assert.False(container.Remove("NonExistent"));
+    }
+
+    [Fact]
+    public void Remove_WithTypeInference_RemovesService()
+    {
+        using var container = new Container();
+
+        container.Register(new User(1, "Alice", "alice@example.com"));
+        Assert.True(container.Contains<User>());
+
+        Assert.True(container.Remove<User>());
+        Assert.False(container.Contains<User>());
+    }
+
+    [Fact]
+    public void Clear_RemovesAllServices()
+    {
+        using var container = new Container();
+
+        container.Register("Config", new Config(true, 8080, "localhost"));
+        container.Register("User", new User(1, "Alice", "alice@example.com"));
+        container.Register("Db", new DatabaseConfig("conn", 10));
+        Assert.Equal(3, container.ServiceCount);
+
+        container.Clear();
+
+        Assert.Equal(0, container.ServiceCount);
+        Assert.False(container.Contains("Config"));
+        Assert.False(container.Contains("User"));
+        Assert.False(container.Contains("Db"));
+    }
+
+    [Fact]
+    public void Clear_EmptyContainer_IsSafe()
+    {
+        using var container = new Container();
+
+        container.Clear();
+
+        Assert.Equal(0, container.ServiceCount);
+    }
+
+    [Fact]
+    public void IsLocked_IsFalseUntilLocked()
+    {
+        using var container = new Container();
+
+        Assert.False(container.IsLocked);
+
+        container.Lock();
+
+        Assert.True(container.IsLocked);
+    }
+
+    [Fact]
+    public void Lock_ThenRegister_ThrowsWithLockedCode()
+    {
+        using var container = new Container();
+        container.Lock();
+
+        var ex = Assert.Throws<DIException>(() =>
+            container.Register("Config", new Config(true, 8080, "localhost")));
+
+        Assert.Equal(DiErrorCode.Locked, ex.ErrorCode);
+        Assert.NotEmpty(ex.Message);
+        Assert.Equal(0, container.ServiceCount);
+    }
+
+    [Fact]
+    public void Lock_ThenRegisterWithTypeInference_ThrowsWithLockedCode()
+    {
+        using var container = new Container();
+        container.Lock();
+
+        var ex = Assert.Throws<DIException>(() =>
+            container.Register(new User(1, "Alice", "alice@example.com")));
+
+        Assert.Equal(DiErrorCode.Locked, ex.ErrorCode);
+    }
+
+    [Fact]
+    public void Lock_StillPermitsRemove()
+    {
+        using var container = new Container();
+        container.Register("Config", new Config(true, 8080, "localhost"));
+
+        container.Lock();
+
+        Assert.True(container.Remove("Config"));
+        Assert.False(container.Contains("Config"));
+        Assert.True(container.IsLocked);
+    }
+
+    [Fact]
+    public void Lock_StillPermitsClear()
+    {
+        using var container = new Container();
+        container.Register("Config", new Config(true, 8080, "localhost"));
+        container.Register("User", new User(1, "Alice", "alice@example.com"));
+
+        container.Lock();
+        container.Clear();
+
+        Assert.Equal(0, container.ServiceCount);
+        Assert.True(container.IsLocked);
+    }
+
+    [Fact]
+    public void Lock_IsIdempotent()
+    {
+        using var container = new Container();
+
+        container.Lock();
+        container.Lock();
+
+        Assert.True(container.IsLocked);
+    }
+
+    [Fact]
+    public void Lock_DoesNotLockExistingResolution()
+    {
+        using var container = new Container();
+        var config = new Config(true, 8080, "localhost");
+        container.Register("Config", config);
+
+        container.Lock();
+
+        Assert.Equal(config, container.Resolve<Config>("Config"));
+    }
+
+    [Fact]
+    public void Scope_OfLockedContainer_StartsUnlocked()
+    {
+        using var parent = new Container();
+        parent.Lock();
+
+        using var child = parent.Scope();
+
+        Assert.False(child.IsLocked);
+        child.Register("ChildOnly", new User(1, "Alice", "alice@example.com"));
+        Assert.True(child.Contains("ChildOnly"));
+    }
+
+    [Fact]
+    public void NewMembers_ThrowAfterDispose()
+    {
+        var container = new Container();
+        container.Dispose();
+
+        Assert.Throws<ObjectDisposedException>(() => { container.Remove("Config"); });
+        Assert.Throws<ObjectDisposedException>(() => container.Clear());
+        Assert.Throws<ObjectDisposedException>(() => container.Lock());
+        Assert.Throws<ObjectDisposedException>(() => container.IsLocked);
+        Assert.Throws<ObjectDisposedException>(() => { container.Contains("Config"); });
+    }
 }
 
 
