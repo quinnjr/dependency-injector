@@ -8,7 +8,7 @@
 
     <!-- Package metadata -->
     <PackageId>PegasusHeavy.DependencyInjector</PackageId>
-    <Version>2.0.0</Version>
+    <Version>2.1.0</Version>
     <Authors>Pegasus Heavy Industries</Authors>
     <Description>C# bindings for the high-performance Rust dependency injection container. Native libraries bundled for Linux, macOS, and Windows.</Description>
     <PackageLicenseExpression>MIT OR Apache-2.0</PackageLicenseExpression>
