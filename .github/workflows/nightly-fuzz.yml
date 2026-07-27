@@ -48,6 +48,10 @@ jobs:
             ${{ runner.os }}-fuzz-
 
       - name: Run fuzz targets
+        # Fuzz targets keep intentionally-dead payload fields; do not inherit
+        # the global -Dwarnings gate (lint jobs own that).
+        env:
+          RUSTFLAGS: ""
         run: |
           for target in fuzz_container fuzz_scoped fuzz_concurrent fuzz_lifecycle; do
             echo "::group::${target}"

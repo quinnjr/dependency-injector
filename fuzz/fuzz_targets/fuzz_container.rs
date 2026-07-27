@@ -4,10 +4,9 @@
 //!
 //! Tests registration and resolution with various data patterns.
 
-use arbitrary::{Arbitrary, Unstructured};
+use arbitrary::Arbitrary;
 use dependency_injector::Container;
 use libfuzzer_sys::fuzz_target;
-use std::sync::Arc;
 
 /// Service types for fuzzing
 #[derive(Clone, Debug, Arbitrary)]
