@@ -1,0 +1,65 @@
+# dependency-injector
+
+> A high-performance, lock-free dependency injection container for Rust.
+
+dependency-injector provides a thread-safe, type-safe DI container built on DashMap for concurrent access without mutex contention. It supports multiple service lifetimes (singleton, transient, lazy), scoped child containers with inheritance and overrides, compile-time injection via derive macros, structured logging, and FFI bindings for use from Go, Python, Node.js, C#, and C/C++. Benchmarks show singleton resolution in 17-32 ns, making it 6-14x faster than popular DI libraries in other languages.
+
+## Links
+
+- [Documentation](https://pegasusheavy.github.io/dependency-injector/)
+- [GitHub Repository](https://github.com/pegasusheavy/dependency-injector)
+- [Crates.io Package](https://crates.io/crates/dependency-injector)
+- [API Docs (docs.rs)](https://docs.rs/dependency-injector)
+
+## Key Features
+
+- Lock-free performance -- built on DashMap for concurrent access without mutex contention
+- Thread-safe -- safe to use across threads with `Arc<Container>`
+- Type-safe -- compile-time guarantees with Rust's type system
+- Multiple lifetimes -- singleton, transient, and lazy initialization
+- Scoped containers -- create child containers with inherited and overridden services
+- Zero config -- no macros required, just plain Rust (macros available optionally)
+- Compile-time injection -- `#[derive(Inject)]` macro for automatic dependency resolution
+- Structured logging -- JSON and pretty logging output via tracing
+- FFI bindings -- use from Go, Python, Node.js, C#, and C/C++
+- Framework integration -- works with the Armature HTTP framework
+- Fuzz testing -- comprehensive fuzz targets for container operations
+
+## Installation
+
+```toml
+[dependencies]
+dependency-injector = "0.2"
+```
+
+## Quick Start
+
+```rust
+use dependency_injector::Container;
+
+#[derive(Clone)]
+struct Database { url: String }
+
+#[derive(Clone)]
+struct UserService { db: Database }
+
+fn main() {
+    let container = Container::new();
+
+    // Register a singleton
+    container.singleton(Database {
+        url: "postgres://localhost/mydb".into(),
+    });
+
+    // Register with lazy initialization
+    let c = container.clone();
+    container.lazy(move || UserService {
+        db: c.get().unwrap(),
+    });
+
+    // Resolve services
+    let db = container.get::<Database>().unwrap();
+    let users = container.get::<UserService>().unwrap();
+    println!("Connected to: {}", db.url);
+}
+```

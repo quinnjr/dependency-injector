@@ -1,0 +1,71 @@
+{
+  "name": "Dependency Injector - High-Performance DI",
+  "short_name": "DI",
+  "description": "High-performance dependency injection for Rust with FFI bindings for Go, Node.js, Python, and C#. ~9ns resolution, lock-free, thread-safe.",
+  "start_url": "/dependency-injector/",
+  "scope": "/dependency-injector/",
+  "id": "/dependency-injector/",
+  "display": "standalone",
+  "display_override": ["window-controls-overlay", "standalone", "browser"],
+  "background_color": "#0f172a",
+  "theme_color": "#e9721c",
+  "orientation": "any",
+  "categories": ["developer tools", "utilities", "productivity"],
+  "lang": "en-US",
+  "dir": "ltr",
+  "icons": [
+    {
+      "src": "favicon-16x16.png",
+      "sizes": "16x16",
+      "type": "image/png"
+    },
+    {
+      "src": "favicon-32x32.png",
+      "sizes": "32x32",
+      "type": "image/png"
+    },
+    {
+      "src": "favicon-48x48.png",
+      "sizes": "48x48",
+      "type": "image/png"
+    },
+    {
+      "src": "android-chrome-192x192.png",
+      "sizes": "192x192",
+      "type": "image/png",
+      "purpose": "any"
+    },
+    {
+      "src": "android-chrome-512x512.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "any maskable"
+    }
+  ],
+  "screenshots": [],
+  "shortcuts": [
+    {
+      "name": "Getting Started",
+      "short_name": "Start",
+      "description": "Quick start guide for dependency-injector",
+      "url": "/dependency-injector/docs/getting-started",
+      "icons": [{ "src": "favicon-96x96.png", "sizes": "96x96" }]
+    },
+    {
+      "name": "API Reference",
+      "short_name": "API",
+      "description": "Complete API documentation",
+      "url": "/dependency-injector/docs/api",
+      "icons": [{ "src": "favicon-96x96.png", "sizes": "96x96" }]
+    },
+    {
+      "name": "Benchmarks",
+      "short_name": "Benchmarks",
+      "description": "Performance benchmarks and comparisons",
+      "url": "/dependency-injector/benchmarks",
+      "icons": [{ "src": "favicon-96x96.png", "sizes": "96x96" }]
+    }
+  ],
+  "related_applications": [],
+  "prefer_related_applications": false
+}
