@@ -438,6 +438,28 @@ mod tests {
             1,
             "initialization should complete exactly once"
         );
+
+        // The other half of the documented contract: the first *successful*
+        // value is cached and shared by every later resolve. The failsafe
+        // timeout also catches a regression that re-ran the factory, which
+        // would park on the (now permit-less) gate forever.
+        let again = timeout(
+            Duration::from_secs(5),
+            container.get_async::<GatedService>(),
+        )
+        .await
+        .expect("a cached resolve must not re-enter the factory")
+        .unwrap();
+
+        assert!(
+            Arc::ptr_eq(&resolved, &again),
+            "the cached value must be shared by every later resolve"
+        );
+        assert_eq!(
+            ENTERED.load(Ordering::SeqCst),
+            2,
+            "a cached resolve must not run the factory again"
+        );
     }
 
     #[tokio::test]

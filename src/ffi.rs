@@ -35,7 +35,10 @@ pub struct DiContainer {
     /// Map of type names to their registered services (as raw bytes)
     services: RwLock<HashMap<String, Arc<dyn Any + Send + Sync>>>,
     /// Lock state - when set, registration is blocked (removal is not),
-    /// matching the core container's locking semantics.
+    /// matching the core container's locking semantics. Both the store (in
+    /// `di_lock`) and the load (in `di_register_singleton`) happen while
+    /// holding the `services` write guard, which is what makes locking a
+    /// total barrier rather than a check-then-act race.
     locked: AtomicBool,
 }
 
@@ -101,7 +104,10 @@ thread_local! {
 /// Must stay allocation-only and non-reentrant (no logging, callbacks, or
 /// re-entry into FFI functions): the `Err` arm of [`ffi_guard`] calls this
 /// OUTSIDE `catch_unwind`, so a panic raised here would unwind straight
-/// across the FFI boundary.
+/// across the FFI boundary. The one failure mode that is not under this
+/// module's control - the thread-local having already been destroyed during
+/// TLS teardown - is handled explicitly: `try_with` reports it as an error
+/// that is dropped, where `with` would panic.
 fn set_last_error(msg: impl Into<String>) {
     // Replace control characters (incl. newlines) with spaces: type names
     // are caller-supplied and error strings flow into host application
@@ -111,7 +117,9 @@ fn set_last_error(msg: impl Into<String>) {
         .chars()
         .map(|c| if c.is_control() { ' ' } else { c })
         .collect();
-    LAST_ERROR.with(|e| {
+    // Deliberately `try_with`: during TLS teardown the thread-local is gone
+    // and `with` would panic - here, outside `catch_unwind`.
+    let _ = LAST_ERROR.try_with(|e| {
         *e.borrow_mut() = Some(sanitized);
     });
 }
@@ -305,18 +313,24 @@ pub unsafe extern "C" fn di_register_singleton(
         // SAFETY: Caller guarantees container is valid
         let container = unsafe { &*container };
 
-        // Match core semantics: locking blocks registration only.
-        if container.locked.load(Ordering::Acquire) {
-            set_last_error("Container is locked - cannot register new services");
-            return DiErrorCode::Locked;
-        }
-
         // Check and insert atomically under a single write lock so two threads
         // cannot both pass the existence check and silently overwrite each other.
         let mut services = container
             .services
             .write()
             .unwrap_or_else(PoisonError::into_inner);
+
+        // Match core semantics: locking blocks registration only. The check
+        // lives INSIDE the write-guard critical section, and `di_lock()` takes
+        // the same guard before setting the flag, which makes the lock a total
+        // barrier: once `di_lock()` returns, no in-flight registration can
+        // still land. It also stays ahead of the occupancy check below, so a
+        // duplicate name on a locked container still reports `Locked`.
+        if container.locked.load(Ordering::Acquire) {
+            set_last_error("Container is locked - cannot register new services");
+            return DiErrorCode::Locked;
+        }
+
         match services.entry(type_name_str) {
             Entry::Occupied(entry) => {
                 set_last_error(format!("Service '{}' is already registered", entry.key()));
@@ -475,6 +489,11 @@ pub unsafe extern "C" fn di_clear(container: *mut DiContainer) -> DiErrorCode {
 /// remain permitted, matching the core container's semantics. There is no
 /// unlock. Child scopes created with `di_container_scope()` start unlocked.
 ///
+/// The lock is a total barrier: the state change is published while holding
+/// the container's write lock, which registration also takes before reading
+/// the state, so once this function returns no concurrent registration can
+/// still land.
+///
 /// A null container is recorded as an error (see `di_error_message()`) and
 /// otherwise ignored.
 ///
@@ -489,7 +508,19 @@ pub unsafe extern "C" fn di_lock(container: *mut DiContainer) {
         }
 
         // SAFETY: Caller guarantees container is valid
-        unsafe { &*container }.locked.store(true, Ordering::Release);
+        let container = unsafe { &*container };
+
+        // Hold the services write guard across the store so the barrier is
+        // total. `di_register_singleton()` reads `locked` while holding this
+        // same guard, so a registration either observed the container as
+        // unlocked and already completed before this guard was acquired, or it
+        // observes `true` and is refused - none can slip in behind us.
+        let guard = container
+            .services
+            .write()
+            .unwrap_or_else(PoisonError::into_inner);
+        container.locked.store(true, Ordering::Release);
+        drop(guard);
     });
 }
 
@@ -929,10 +960,25 @@ mod tests {
         message
     }
 
+    /// Run `f` with the panic hook silenced, then restore the previous hook.
+    ///
+    /// The tests below panic on purpose; without this the default hook prints
+    /// the panic and (CI sets `RUST_BACKTRACE=1`) a backtrace on every green
+    /// run. The hook is process-global, so `f` must be kept to just the
+    /// deliberate panic - assertions belong outside the window.
+    fn with_silent_panic_hook<T>(f: impl FnOnce() -> T) -> T {
+        let previous = std::panic::take_hook();
+        std::panic::set_hook(Box::new(|_| {}));
+        let result = f();
+        std::panic::set_hook(previous);
+        result
+    }
+
     #[test]
     fn test_ffi_guard_catches_str_panic() {
         di_error_clear();
-        assert_eq!(panicking_entry_str(), DiErrorCode::InternalError);
+        let code = with_silent_panic_hook(panicking_entry_str);
+        assert_eq!(code, DiErrorCode::InternalError);
         let msg = last_error_string();
         assert!(msg.contains("internal panic"), "got: {msg}");
         assert!(msg.contains("boom"), "got: {msg}");
@@ -941,10 +987,141 @@ mod tests {
     #[test]
     fn test_ffi_guard_catches_string_panic() {
         di_error_clear();
-        assert_eq!(panicking_entry_string(), DiErrorCode::InternalError);
+        let code = with_silent_panic_hook(panicking_entry_string);
+        assert_eq!(code, DiErrorCode::InternalError);
         let msg = last_error_string();
         assert!(msg.contains("internal panic"), "got: {msg}");
         assert!(msg.contains("boom-string"), "got: {msg}");
+    }
+
+    /// Every exported entry point must route through [`ffi_guard`]: a panic
+    /// that escapes one would unwind across the ABI boundary, which is
+    /// undefined behaviour. The `#[cfg(test)]` panic helpers call `ffi_guard`
+    /// explicitly, so they pin the guard's own behaviour but not its use -
+    /// deleting the wrapper from a real entry point would otherwise fail no
+    /// test. Close that gap by scanning this module's own source.
+    ///
+    /// Parsing heuristic, matched to this file's actual layout (which rustfmt
+    /// keeps stable): an entry point begins on the line carrying the C ABI
+    /// marker and ends at the next line that is exactly a closing brace at
+    /// column zero, which rustfmt guarantees for top-level items and never
+    /// produces inside one. A multi-line signature is covered automatically
+    /// because the scanned span simply runs on to that brace. Entry points
+    /// preceded by a `#[cfg(test)]` attribute are skipped as non-ABI.
+    #[test]
+    fn test_every_entry_point_routes_through_ffi_guard() {
+        // Number of exported entry points at the time of writing; a lower
+        // bound, so adding one does not fail here - it gets scanned instead.
+        const KNOWN_ENTRY_POINTS: usize = 21;
+        let source = include_str!("ffi.rs");
+        let lines: Vec<&str> = source.lines().collect();
+        let marker = concat!("extern ", '"', "C", '"', " fn ");
+        let mut scanned = 0_usize;
+
+        for (start, line) in lines.iter().enumerate() {
+            let Some(after_marker) = line.split(marker).nth(1) else {
+                continue;
+            };
+            // Attributes and doc comments sit directly above the signature.
+            let is_test_only = lines[..start]
+                .iter()
+                .rev()
+                .take_while(|l| l.starts_with('#') || l.starts_with("//"))
+                .any(|l| l.contains("#[cfg(test)]"));
+            if is_test_only {
+                continue;
+            }
+
+            let name = after_marker.split(['(', '<', ' ']).next().unwrap_or("?");
+            let Some(offset) = lines[start + 1..].iter().position(|l| *l == "}") else {
+                panic!("{name}: no closing brace at column zero - heuristic broke");
+            };
+            let body = lines[start..=start + 1 + offset].join("\n");
+
+            assert!(
+                body.contains("ffi_guard("),
+                "{name} does not route through ffi_guard; a panic inside it \
+                 would unwind across the FFI boundary"
+            );
+            scanned += 1;
+        }
+
+        assert!(
+            scanned >= KNOWN_ENTRY_POINTS,
+            "only {scanned} entry points scanned (expected at least \
+             {KNOWN_ENTRY_POINTS}) - the source heuristic has drifted"
+        );
+    }
+
+    #[test]
+    fn test_poisoned_lock_stays_usable() {
+        // Every lock site recovers via `PoisonError::into_inner`. A regression
+        // to `.unwrap()` at any of them would brick the container after one
+        // caught panic, so poison the lock for real and drive the ABI.
+        struct SendPtr(*mut DiContainer);
+        // SAFETY: DiContainer's internals are RwLock/atomic-protected and all
+        // FFI functions are documented as thread-safe.
+        unsafe impl Send for SendPtr {}
+        unsafe impl Sync for SendPtr {}
+
+        let container = std::sync::Arc::new(SendPtr(di_container_new()));
+        assert!(!container.0.is_null());
+
+        let joined = {
+            let container = std::sync::Arc::clone(&container);
+            with_silent_panic_hook(move || {
+                std::thread::spawn(move || {
+                    // SAFETY: the container outlives this thread - it is only
+                    // freed after the join below.
+                    let _guard = unsafe { &*container.0 }.services.write().unwrap();
+                    panic!("deliberate panic while holding the write guard");
+                })
+                .join()
+            })
+        };
+        assert!(joined.is_err(), "the poisoning thread must have panicked");
+
+        // SAFETY: `container.0` came from `di_container_new` above.
+        let poisoned = unsafe { &*container.0 }.services.is_poisoned();
+        assert!(poisoned, "the services lock must now be poisoned");
+
+        let name = CString::new("Poisoned").unwrap();
+        let data = b"data";
+        // SAFETY: the container and `name` are live for this whole block; the
+        // service handle, JSON string, child scope, and container are each
+        // freed exactly once. Every entry point that touches the poisoned lock
+        // is driven here, so a `.unwrap()` regression at any lock site fails.
+        unsafe {
+            assert_eq!(
+                di_register_singleton(container.0, name.as_ptr(), data.as_ptr(), data.len()),
+                DiErrorCode::Ok,
+                "registration must recover from lock poisoning"
+            );
+            assert_eq!(di_contains(container.0, name.as_ptr()), 1);
+            assert_eq!(di_service_count(container.0), 1);
+
+            let resolved = di_resolve(container.0, name.as_ptr());
+            assert_eq!(resolved.code, DiErrorCode::Ok);
+            di_service_free(resolved.service);
+
+            let json = di_resolve_json(container.0, name.as_ptr());
+            assert!(!json.is_null(), "JSON resolve must recover from poisoning");
+            di_string_free(json);
+
+            let child = di_container_scope(container.0);
+            assert!(!child.is_null(), "scoping must recover from poisoning");
+            assert_eq!(di_contains(child, name.as_ptr()), 1);
+            di_container_free(child);
+
+            // di_lock also takes the (poisoned) write guard - see its total
+            // barrier note - and locking still permits removal and clearing.
+            di_lock(container.0);
+            assert_eq!(di_is_locked(container.0), 1);
+            assert_eq!(di_remove(container.0, name.as_ptr()), DiErrorCode::Ok);
+            assert_eq!(di_clear(container.0), DiErrorCode::Ok);
+            assert_eq!(di_service_count(container.0), 0);
+            di_container_free(container.0);
+        }
     }
 
     #[test]
@@ -1105,6 +1282,9 @@ mod tests {
         // di_lock racing di_register_singleton: every registration attempt
         // must resolve cleanly to Ok (beat the lock) or Locked (lost to it),
         // and once the lock has landed it must refuse all later attempts.
+        // Crucially, the reported outcome must match the container's contents
+        // - an Ok whose write was dropped, or a Locked whose write landed
+        // anyway, is exactly the corruption a status-only assertion misses.
         struct SendPtr(*mut DiContainer);
         // SAFETY: DiContainer's internals are RwLock/atomic-protected and all
         // FFI functions are documented as thread-safe.
@@ -1135,21 +1315,40 @@ mod tests {
                     let name = CString::new(format!("Racer{i}")).unwrap();
                     let data = b"race";
                     barrier.wait();
-                    unsafe {
+                    // SAFETY: the container outlives every racer thread.
+                    let code = unsafe {
                         di_register_singleton(container.0, name.as_ptr(), data.as_ptr(), data.len())
-                    }
+                    };
+                    (i, code)
                 })
             })
             .collect();
 
         locker.join().unwrap();
-        for handle in handles {
-            let result = handle.join().unwrap();
-            assert!(
-                result == DiErrorCode::Ok || result == DiErrorCode::Locked,
-                "registration racing di_lock must be Ok or Locked, got {result:?}"
-            );
+        let results: Vec<(usize, DiErrorCode)> =
+            handles.into_iter().map(|h| h.join().unwrap()).collect();
+
+        // Invariant: Ok <=> the name is present. Nothing else registers these
+        // names, so a Locked racer must leave no trace and an Ok racer must.
+        let mut expected_count = 0_i64;
+        for (i, code) in &results {
+            let name = CString::new(format!("Racer{i}")).unwrap();
+            // SAFETY: the container is alive until it is freed below.
+            let present = unsafe { di_contains(container.0, name.as_ptr()) };
+            match code {
+                DiErrorCode::Ok => {
+                    expected_count += 1;
+                    assert_eq!(present, 1, "Racer{i}: Ok registration was lost");
+                }
+                DiErrorCode::Locked => {
+                    assert_eq!(present, 0, "Racer{i}: Locked registration landed anyway");
+                }
+                other => panic!("Racer{i}: must be Ok or Locked, got {other:?}"),
+            }
         }
+        // SAFETY: the container is alive until it is freed below.
+        let count = unsafe { di_service_count(container.0) };
+        assert_eq!(count, expected_count, "count must match the Ok results");
 
         unsafe {
             // The lock has landed: every subsequent registration - raced

@@ -11,12 +11,16 @@ use std::sync::Arc;
 use std::thread;
 
 /// Service for concurrent testing
+// Arbitrary-generated payload; fields vary allocation shape and are never read.
+#[allow(dead_code)]
 #[derive(Clone, Debug, Arbitrary)]
 struct ConcurrentService {
     id: u64,
     data: Vec<u8>,
 }
 
+// Registered as a resolution target only; the field is never read.
+#[allow(dead_code)]
 #[derive(Clone, Debug, Arbitrary)]
 struct SharedConfig {
     value: u32,

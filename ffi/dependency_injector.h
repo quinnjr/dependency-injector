@@ -217,8 +217,9 @@ void di_lock(DiContainer* container);
  * @return 1 if the container is locked, 0 if it is not, -1 on error.
  *         A negative return (-1) signals an internal error or invalid
  *         argument - consult di_error_message() - and callers should not
- *         collapse it into "false". Note: the current language bindings
- *         treat -1 as false (known limitation).
+ *         collapse it into "false". Note: no language binding exposes this
+ *         function yet, so any new binding should surface the -1 case
+ *         explicitly rather than folding it into a boolean.
  */
 int32_t di_is_locked(const DiContainer* container);
 

@@ -39,7 +39,13 @@ jobs:
             VERSION="$HEAD_BRANCH"
           fi
           VERSION="${VERSION#v}"
-          if ! printf '%s\n' "$VERSION" | grep -Eq '^v?[0-9]+\.[0-9]+\.[0-9]+$'; then
+          # Bash's =~ anchors against the whole string; `grep -E '^...$'` anchors
+          # per LINE, so a multi-line workflow_dispatch input would pass on its
+          # first line and smuggle the rest downstream. The leading `v` has
+          # already been stripped above, so the pattern must not re-allow it.
+          # The optional suffix accepts prerelease tags (v2.1.0-rc.1), which the
+          # Release workflow's `v[0-9]+.*` trigger already publishes.
+          if ! [[ "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$ ]]; then
             echo "::error::Invalid or missing release version: '${VERSION}'"
             exit 1
           fi
@@ -56,8 +62,11 @@ jobs:
         uses: dtolnay/rust-toolchain@stable
 
       - name: Build scratch project against published crate
+        env:
+          # Interpolated via env rather than directly in the script so
+          # attacker-controllable values cannot inject shell commands.
+          VERSION: ${{ needs.resolve.outputs.version }}
         run: |
-          VERSION="${{ needs.resolve.outputs.version }}"
           cargo new verify-install
           cd verify-install
 
@@ -124,6 +133,23 @@ jobs:
         run: |
           # End-to-end integrity check: download the published checksum
           # manifest plus one representative asset and verify it matches.
+          #
+          # Releases cut before SHA256SUMS existed have no manifest. Probe for
+          # it explicitly rather than letting `gh release download` exit 0 on a
+          # partial pattern match and sha256sum then die with an opaque "No such
+          # file or directory". Deliberate choice: warn and proceed, matching the
+          # warn-and-proceed policy the installers document for the same case.
+          # Capture gh's own exit status (not grep's) so an API/auth failure is
+          # reported as an error instead of being mistaken for "no manifest".
+          if ! RELEASE_ASSETS=$(gh release view "v${VERSION}" --json assets --jq '.assets[].name'); then
+            echo "::error::Could not list assets for release v${VERSION}"
+            exit 1
+          fi
+          if ! printf '%s\n' "$RELEASE_ASSETS" | grep -qx 'SHA256SUMS'; then
+            echo "::warning::Release v${VERSION} has no SHA256SUMS asset (predates checksum publishing); skipping checksum verification"
+            exit 0
+          fi
+
           mkdir -p checksum-verify
           cd checksum-verify
           gh release download "v${VERSION}" \

@@ -14,6 +14,8 @@ static LAZY_COUNTER: AtomicU64 = AtomicU64::new(0);
 static TRANSIENT_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 /// Service with lazy initialization tracking
+// Counter-stamped payload; identity is checked via `Arc::ptr_eq`, fields are never read.
+#[allow(dead_code)]
 #[derive(Clone, Debug)]
 struct LazyService {
     id: u64,
@@ -27,6 +29,8 @@ struct TransientService {
 }
 
 /// Simple singleton
+// Arbitrary-generated payload; the field varies allocation shape and is never read.
+#[allow(dead_code)]
 #[derive(Clone, Debug, Arbitrary)]
 struct SimpleService {
     value: u32,

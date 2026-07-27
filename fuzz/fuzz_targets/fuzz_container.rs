@@ -9,12 +9,16 @@ use dependency_injector::Container;
 use libfuzzer_sys::fuzz_target;
 
 /// Service types for fuzzing
+// Arbitrary-generated payload; fields vary allocation shape and are never read.
+#[allow(dead_code)]
 #[derive(Clone, Debug, Arbitrary)]
 struct SmallService {
     id: u32,
     name: String,
 }
 
+// Arbitrary-generated payload; fields vary allocation shape and are never read.
+#[allow(dead_code)]
 #[derive(Clone, Debug, Arbitrary)]
 struct MediumService {
     id: u64,
@@ -22,6 +26,8 @@ struct MediumService {
     config: ServiceConfig,
 }
 
+// Arbitrary-generated payload; fields vary allocation shape and are never read.
+#[allow(dead_code)]
 #[derive(Clone, Debug, Arbitrary)]
 struct ServiceConfig {
     enabled: bool,
@@ -30,6 +36,8 @@ struct ServiceConfig {
     tags: Vec<String>,
 }
 
+// Arbitrary-generated payload; fields vary allocation shape and are never read.
+#[allow(dead_code)]
 #[derive(Clone, Debug, Arbitrary)]
 struct LargeService {
     id: u128,

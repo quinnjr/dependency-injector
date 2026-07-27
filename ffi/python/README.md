@@ -51,7 +51,24 @@ export DI_LIBRARY_PATH=$(pwd)/target/release/libdependency_injector.so
 |----------|-------------|
 | `DI_LIBRARY_PATH` | Custom path to native library |
 | `DI_SKIP_DOWNLOAD` | Skip automatic download (for offline/CI) |
-| `DI_GITHUB_TOKEN` | GitHub token for download rate limiting |
+| `DI_GITHUB_TOKEN` | GitHub token for download rate limiting. Only ever sent to `api.github.com` — it is stripped on any cross-host redirect and never sent to download hosts |
+| `DI_REQUIRE_CHECKSUM` | When set (non-empty), a release with no `SHA256SUMS` asset is a hard failure (exit 1) instead of a warning |
+
+### Install Failure Policy
+
+The downloader distinguishes availability problems (soft) from integrity
+problems (hard):
+
+| Situation | Behaviour |
+|-----------|-----------|
+| Release metadata fetch fails, platform asset missing from the release, download fails, or the transfer is truncated | Warn, print build-from-source instructions, **exit 0** |
+| Checksum mismatch, `SHA256SUMS` present but with no entry for the asset, or an existing `SHA256SUMS` asset cannot be fetched | **Exit 1**; the downloaded file is deleted |
+| Release has no `SHA256SUMS` asset at all (pre-checksum release) | Warn and proceed — unless `DI_REQUIRE_CHECKSUM` is set, then **exit 1** |
+| Unsupported platform | **Exit 1** |
+
+Downloads are staged next to the final path and only moved into place after the
+checksum verifies, so the library path never holds an unverified or partial
+file. A truncated transfer is reported as a network error, never as tampering.
 
 ### Download Pre-built Library
 
@@ -60,6 +77,15 @@ If you installed from source distribution (sdist), you can download the native l
 ```bash
 python -m scripts.download_native
 ```
+
+**Exit-code contract:** this command exits `0` even when no library was
+downloaded (a missing asset or a network failure is non-fatal, so it never
+breaks an install). It prints `NO NATIVE LIBRARY WAS INSTALLED` in that case —
+do not read a `0` exit as proof the library is present, and do not rely on a
+`&& python -c "import dependency_injector"` chain to catch it, since the chain
+will simply run and fail on its own. A non-zero exit means an integrity failure
+or an unsupported platform. For strict mode, set `DI_REQUIRE_CHECKSUM=1` so an
+unverifiable (pre-checksum) release fails hard instead of proceeding.
 
 ## Quick Start
 

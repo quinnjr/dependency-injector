@@ -7,20 +7,25 @@
 use arbitrary::Arbitrary;
 use dependency_injector::{Container, ScopedContainer};
 use libfuzzer_sys::fuzz_target;
-use std::sync::Arc;
 
 /// Service types
+// Arbitrary-generated payload; fields vary allocation shape and are never read.
+#[allow(dead_code)]
 #[derive(Clone, Debug, Arbitrary)]
 struct RootService {
     id: u32,
 }
 
+// Arbitrary-generated payload; fields vary allocation shape and are never read.
+#[allow(dead_code)]
 #[derive(Clone, Debug, Arbitrary)]
 struct ScopedService {
     scope_id: u32,
     data: Vec<u8>,
 }
 
+// Arbitrary-generated payload; fields vary allocation shape and are never read.
+#[allow(dead_code)]
 #[derive(Clone, Debug, Arbitrary)]
 struct OverrideService {
     value: String,
@@ -79,10 +84,10 @@ fuzz_target!(|ops: Vec<ScopedOp>| {
                 }
             }
             ScopedOp::CreateNestedScope => {
-                if let Some(parent) = scopes.last() {
-                    if scopes.len() < 10 {
-                        scopes.push(parent.scope());
-                    }
+                if let Some(parent) = scopes.last()
+                    && scopes.len() < 10
+                {
+                    scopes.push(parent.scope());
                 }
             }
             ScopedOp::RegisterInScope(svc) => {

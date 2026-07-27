@@ -11,30 +11,33 @@
  * - DI_SKIP_DOWNLOAD: Skip download (for local development)
  * - DI_GITHUB_TOKEN: GitHub token for private repos or rate limiting.
  *   Only ever sent to api.github.com — never to download hosts or
- *   arbitrary redirect targets.
+ *   arbitrary redirect targets. When set, assets are fetched through the
+ *   api.github.com asset endpoint (which the token authenticates) rather
+ *   than the public browser_download_url, so private repos work.
  * - DI_REQUIRE_CHECKSUM: When set (non-empty), a release that has no
  *   SHA256SUMS asset is a hard failure (exit 1) instead of a warning.
  *
  * Failure policy:
  * - Network/download failure (release metadata fetch fails, asset missing
- *   from the release, download or filesystem error): warn and exit 0 —
- *   the library can be built from source or fetched later.
- * - Checksum mismatch, SHA256SUMS present but missing an entry for the
- *   asset, or failure to fetch an existing SHA256SUMS asset: hard failure
- *   (exit 1) and the downloaded file is deleted.
+ *   from the release, truncated body, download or filesystem error): warn
+ *   and exit 0 — the library can be built from source or fetched later.
+ * - Checksum mismatch on a *complete* download, SHA256SUMS present but
+ *   missing an entry for the asset, or failure to fetch an existing
+ *   SHA256SUMS asset: hard failure (exit 1) and the downloaded file is
+ *   deleted.
  * - Release has no SHA256SUMS asset at all (pre-checksum release): warn
  *   and proceed, unless DI_REQUIRE_CHECKSUM is set (then exit 1).
  *
- * Downloads are staged at "<output>.download" and only renamed into place
- * after checksum verification succeeds, so the final library path never
- * holds an unverified file. On any failure the staged file is deleted.
+ * Downloads are staged at "<output>.download.<pid>" and only renamed into
+ * place after checksum verification succeeds, so the final library path
+ * never holds an unverified file. On any failure the staged file is deleted.
  */
 
 import https from 'https';
 import fs from 'fs';
 import path from 'path';
-import { fileURLToPath, pathToFileURL } from 'url';
-import { createWriteStream } from 'fs';
+import { fileURLToPath } from 'url';
+import { createReadStream, createWriteStream } from 'fs';
 import { createHash } from 'node:crypto';
 
 const __filename = fileURLToPath(import.meta.url);
@@ -69,6 +72,10 @@ const OUTPUT_NAMES = {
 /**
  * Error type for checksum-verification failures. Per the failure policy
  * these are hard failures (exit 1), unlike ordinary network errors.
+ *
+ * Reserved for a *complete* download whose contents cannot be trusted: a
+ * digest mismatch, a missing SHA256SUMS entry, or an unfetchable SHA256SUMS
+ * asset. Truncated downloads are network failures and use a plain Error.
  */
 class VerificationError extends Error {
   constructor(message) {
@@ -84,6 +91,35 @@ function getPlatformKey() {
   const platform = process.platform;
   const arch = process.arch;
   return `${platform}-${arch}`;
+}
+
+/**
+ * Decide how to fetch a release asset.
+ *
+ * Without a token, use the public `browser_download_url` (host github.com).
+ * With DI_GITHUB_TOKEN, use the release-asset API endpoint (`asset.url`,
+ * host api.github.com) with `Accept: application/octet-stream`: that host
+ * IS the one httpsGet attaches the token to, so private-repo assets
+ * authenticate. GitHub answers with a redirect to a signed CDN URL, and
+ * httpsGet re-evaluates the token per hop, so the token is stripped before
+ * it reaches the CDN.
+ */
+function assetRequest(asset) {
+  if (process.env.DI_GITHUB_TOKEN && asset.url) {
+    return {
+      url: asset.url,
+      options: { headers: { 'Accept': 'application/octet-stream' } },
+    };
+  }
+  return { url: asset.browser_download_url, options: {} };
+}
+
+/**
+ * Staging path for a download: sibling of the final path (so the rename is
+ * atomic) and PID-qualified so concurrent installs cannot interleave.
+ */
+function stagingPathFor(outputPath) {
+  return `${outputPath}.download.${process.pid}`;
 }
 
 /**
@@ -131,19 +167,39 @@ function httpsGet(url, options = {}, redirectsLeft = MAX_REDIRECTS) {
 
 /**
  * Download a file from URL to destination.
+ *
+ * Resolves from the write stream's 'close' event (not 'finish'), so the
+ * file descriptor is closed before the caller hashes or renames the file.
+ *
+ * When the response advertises a Content-Length, the bytes actually written
+ * are compared against it: a short read means the connection dropped
+ * mid-body, which is a network failure (plain Error → soft path), not
+ * tampering. VerificationError is reserved for a complete download whose
+ * digest is wrong.
  */
-async function downloadFile(url, dest) {
-  const res = await httpsGet(url);
+async function downloadFile(url, dest, options = {}, getImpl = httpsGet) {
+  const res = await getImpl(url, options);
 
   return new Promise((resolve, reject) => {
+    const declared = res.headers && res.headers['content-length'];
+    const expectedBytes = declared === undefined ? NaN : Number.parseInt(declared, 10);
+
     const file = createWriteStream(dest);
     res.pipe(file);
-    file.on('finish', () => {
-      file.close();
+
+    file.on('close', () => {
+      if (Number.isFinite(expectedBytes) && file.bytesWritten !== expectedBytes) {
+        fs.rmSync(dest, { force: true }); // Clean up the truncated file
+        reject(new Error(
+          `incomplete download of ${url}: expected ${expectedBytes} bytes, ` +
+          `received ${file.bytesWritten} (connection closed early)`
+        ));
+        return;
+      }
       resolve();
     });
     res.on('error', (err) => {
-      file.close();
+      file.destroy();
       fs.rmSync(dest, { force: true }); // Clean up
       reject(err);
     });
@@ -183,8 +239,8 @@ async function getReleaseAssets(version) {
 /**
  * Download a URL body as text (used for the SHA256SUMS asset).
  */
-async function fetchText(url) {
-  const res = await httpsGet(url);
+async function fetchText(url, options = {}) {
+  const res = await httpsGet(url, options);
 
   return new Promise((resolve, reject) => {
     let data = '';
@@ -218,6 +274,20 @@ function sha256Hex(data) {
 }
 
 /**
+ * Hex-encoded SHA-256 digest of a file, hashed in chunks so a large library
+ * is never held in memory whole (matches the Python installer's loop).
+ */
+function sha256File(filePath) {
+  return new Promise((resolve, reject) => {
+    const hash = createHash('sha256');
+    const stream = createReadStream(filePath);
+    stream.on('data', chunk => hash.update(chunk));
+    stream.on('error', reject);
+    stream.on('end', () => resolve(hash.digest('hex')));
+  });
+}
+
+/**
  * Verify the downloaded file against the release's SHA256SUMS asset.
  *
  * - Release has no SHA256SUMS asset (pre-checksum release): warn loudly and
@@ -225,8 +295,11 @@ function sha256Hex(data) {
  * - SHA256SUMS exists but cannot be fetched, has no entry for the asset, or
  *   the hash mismatches: throw a VerificationError (the caller deletes the
  *   staged file and exits non-zero).
+ *
+ * `fetchImpl` is an injection seam for tests; it defaults to fetchText and
+ * receives the same (url, options) pair the real fetch would use.
  */
-async function verifyChecksum(assets, tag, assetName, filePath) {
+async function verifyChecksum(assets, tag, assetName, filePath, fetchImpl = fetchText) {
   const sumsAsset = assets.find(a => a.name === 'SHA256SUMS');
 
   if (!sumsAsset) {
@@ -241,7 +314,8 @@ async function verifyChecksum(assets, tag, assetName, filePath) {
 
   let sumsText;
   try {
-    sumsText = await fetchText(sumsAsset.browser_download_url);
+    const { url, options } = assetRequest(sumsAsset);
+    sumsText = await fetchImpl(url, options);
   } catch (err) {
     throw new VerificationError(
       `failed to download SHA256SUMS from release ${tag}: ${err.message}`
@@ -255,7 +329,7 @@ async function verifyChecksum(assets, tag, assetName, filePath) {
     );
   }
 
-  const actual = sha256Hex(fs.readFileSync(filePath));
+  const actual = await sha256File(filePath);
   if (actual !== expected) {
     throw new VerificationError(
       `checksum mismatch for '${assetName}' (release ${tag}): ` +
@@ -265,6 +339,52 @@ async function verifyChecksum(assets, tag, assetName, filePath) {
   }
 
   console.log(`✅ SHA256 checksum verified: ${actual}`);
+}
+
+/**
+ * Download an asset to a staging path, verify it, mark it executable and
+ * move it into place. The final path only ever receives a verified file;
+ * on any failure the staged file is removed and the error is re-thrown for
+ * the caller to classify (VerificationError → exit 1, anything else → warn).
+ *
+ * `downloadImpl` / `fetchImpl` are injection seams for tests.
+ */
+async function stageAndInstall({
+  asset,
+  assets,
+  tag,
+  assetName,
+  outputPath,
+  tempPath = stagingPathFor(outputPath),
+  downloadImpl = downloadFile,
+  fetchImpl = fetchText,
+}) {
+  try {
+    const { url, options } = assetRequest(asset);
+    await downloadImpl(url, tempPath, options);
+
+    // Verify against the release's SHA256SUMS BEFORE the file becomes
+    // visible at its final path (throws VerificationError on failure).
+    await verifyChecksum(assets, tag, assetName, tempPath, fetchImpl);
+
+    // Make executable on Unix
+    if (process.platform !== 'win32') {
+      fs.chmodSync(tempPath, 0o755);
+    }
+
+    // Atomically move the verified file into place
+    fs.renameSync(tempPath, outputPath);
+  } catch (error) {
+    // Never leave a partially-downloaded or unverified file behind
+    try {
+      fs.rmSync(tempPath, { force: true });
+    } catch {
+      // Best-effort cleanup; the file is outside the trusted final path
+    }
+    throw error;
+  }
+
+  return outputPath;
 }
 
 /**
@@ -334,8 +454,11 @@ async function install() {
   const outputDir = path.join(__dirname, '..', 'native');
   const outputPath = path.join(outputDir, outputName);
 
-  // Check if already downloaded. Downloads are staged at tempPath and only
-  // renamed here after verification, so a file at the final path is trusted.
+  // Check if already downloaded. A file at the final path was put there by a
+  // completed, verified install by this version of the script (downloads are
+  // staged elsewhere and only renamed in after verification). It is NOT a
+  // guarantee for files left by an interrupted run of an older version that
+  // downloaded straight to this path — remove `native/` if in doubt.
   if (fs.existsSync(outputPath)) {
     console.log(`✅ Native library already exists: ${outputPath}`);
     return;
@@ -344,9 +467,9 @@ async function install() {
   // Create output directory
   fs.mkdirSync(outputDir, { recursive: true });
 
-  // Stage the download next to the final path so the rename below is atomic
-  // (same filesystem). The final path never holds an unverified file.
-  const tempPath = `${outputPath}.download`;
+  // Stage the download next to the final path so the rename is atomic (same
+  // filesystem), PID-qualified so concurrent installs cannot collide.
+  const tempPath = stagingPathFor(outputPath);
 
   // Download from GitHub releases
   try {
@@ -357,31 +480,12 @@ async function install() {
     if (!asset) {
       throw new Error(`Asset '${assetName}' not found in release ${tag}`);
     }
-    console.log(`   URL: ${asset.browser_download_url}`);
+    console.log(`   URL: ${assetRequest(asset).url}`);
 
-    await downloadFile(asset.browser_download_url, tempPath);
-
-    // Verify against the release's SHA256SUMS BEFORE the file becomes
-    // visible at its final path (throws VerificationError on failure).
-    await verifyChecksum(assets, tag, assetName, tempPath);
-
-    // Make executable on Unix
-    if (process.platform !== 'win32') {
-      fs.chmodSync(tempPath, 0o755);
-    }
-
-    // Atomically move the verified file into place
-    fs.renameSync(tempPath, outputPath);
+    await stageAndInstall({ asset, assets, tag, assetName, outputPath, tempPath });
 
     console.log(`✅ Downloaded to: ${outputPath}`);
   } catch (error) {
-    // Never leave a partially-downloaded or unverified file behind
-    try {
-      fs.rmSync(tempPath, { force: true });
-    } catch {
-      // Best-effort cleanup; the file is outside the trusted final path
-    }
-
     if (error instanceof VerificationError) {
       // Hard failure per the policy in the header comment
       console.error(`❌ Checksum verification failed: ${error.message}`);
@@ -404,16 +508,42 @@ async function install() {
 
 // Run the installation only when executed directly (postinstall), not when
 // imported (e.g. by the test suite).
-const isMainModule =
-  process.argv[1] !== undefined &&
-  import.meta.url === pathToFileURL(path.resolve(process.argv[1])).href;
+//
+// import.meta.url is symlink-resolved by Node's loader, so argv[1] must be
+// realpath'd too: comparing against a merely lexical path makes the
+// installer a silent no-op whenever any path component is a symlink (pnpm
+// store, macOS /tmp -> /private/tmp, symlinked HOME or CI workspace).
+function isMainModule() {
+  if (process.argv[1] === undefined) return false;
+  try {
+    return __filename === fs.realpathSync(path.resolve(process.argv[1]));
+  } catch {
+    // argv[1] does not exist on disk (e.g. an eval'd entry point)
+    return false;
+  }
+}
 
-if (isMainModule) {
+if (isMainModule()) {
   install().catch((err) => {
     console.error('Installation failed:', err);
     process.exit(1);
   });
+} else {
+  // Make a misdetected main module visible instead of exiting 0 silently.
+  console.log(
+    `ℹ️  dependency-injector install script imported (not executed as ${process.argv[1] ?? '<none>'}); skipping download.`
+  );
 }
 
 // Exported for testing
-export { parseSha256Sums, sha256Hex, verifyChecksum, VerificationError };
+export {
+  assetRequest,
+  downloadFile,
+  parseSha256Sums,
+  sha256File,
+  sha256Hex,
+  stageAndInstall,
+  stagingPathFor,
+  verifyChecksum,
+  VerificationError,
+};

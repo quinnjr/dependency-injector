@@ -234,30 +234,38 @@ jobs:
         with:
           tool: cargo-fuzz
 
-      - name: Cache fuzz build and corpus
+      # NOTE: both cache blocks below are intentionally mirrored in nightly-fuzz.yml.
+      # Build inputs are keyed on the lockfile alone: folding them into the
+      # run-id key minted a fresh multi-hundred-MB entry every run and evicted
+      # other jobs from the repo's 10GB LRU cache budget.
+      - name: Cache fuzz build
         uses: actions/cache@v5
         with:
           path: |
             ~/.cargo/registry
             ~/.cargo/git
             fuzz/target
-            fuzz/corpus
-          # NOTE: this cache block is intentionally mirrored in nightly-fuzz.yml so both workflows share the warmed corpus.
-          # The corpus grows every run, so the key includes the run id to force
-          # a fresh save; restore-keys fall back to the newest previous cache.
-          key: ${{ runner.os }}-fuzz-${{ hashFiles('fuzz/Cargo.lock') }}-${{ github.run_id }}
+          key: ${{ runner.os }}-fuzz-build-${{ hashFiles('fuzz/Cargo.lock') }}
           restore-keys: |
-            ${{ runner.os }}-fuzz-${{ hashFiles('fuzz/Cargo.lock') }}-
-            ${{ runner.os }}-fuzz-
+            ${{ runner.os }}-fuzz-build-
+
+      # The corpus is the only thing that needs to grow every run, so it alone
+      # takes the run-id key to force a fresh save; restore-keys fall back to
+      # the newest previous cache. Shared with nightly-fuzz.yml's fuzz job.
+      - name: Cache fuzz corpus
+        uses: actions/cache@v5
+        with:
+          path: fuzz/corpus
+          key: ${{ runner.os }}-fuzz-corpus-${{ github.run_id }}
+          restore-keys: |
+            ${{ runner.os }}-fuzz-corpus-
 
       - name: Run fuzz targets (30s each)
-        # Fuzz targets keep intentionally-dead payload fields; do not inherit
-        # the global -Dwarnings gate (lint jobs own that).
-        env:
-          RUSTFLAGS: ""
+        # cargo-fuzz defaults --target to its own build triple; taiki-e ships a
+        # musl-linked binary and nightly has no musl std (E0463).
         run: |
           for target in fuzz_container fuzz_scoped fuzz_concurrent fuzz_lifecycle; do
-            cargo +nightly fuzz run "$target" --target x86_64-unknown-linux-gnu -- -max_total_time=30 -timeout=10
+            cargo +nightly fuzz run "$target" --target "$(rustc -vV | sed -n 's/^host: //p')" -- -max_total_time=30 -timeout=10
           done
 
   bindings-test:

@@ -55,9 +55,11 @@ deprecate `Require`/`DeclaresDeps` in 2.x, remove in 3.0.
 `Scope` id), and `ScopePool` overlap. `ScopedContainer` *is* used —
 `examples/scopes.rs`, `examples/logging.rs`, and the docs site's API page
 (`docs/src/app/pages/docs/api/api.html`) all reference it — but only as a
-pass-through for what `Container` already does; `ScopeBuilder` is exported and
-used nowhere. The case for consolidation is the redundant API surface, not
-disuse.
+pass-through for what `Container` already does. `ScopeBuilder` is exercised
+only by its own doctest (`src/scope.rs:255-273`) and the `test_scope_builder`
+unit test (`src/scope.rs:386`) — both compiled and executed, but no consumer
+in `examples/`, `tests/`, or the docs site references it. The case for
+consolidation is the redundant API surface, not disuse.
 
 **Sketch**: fold the `Scope` id into `Container` (it already tracks `depth`),
 reduce `ScopedContainer` to a deprecated alias in 2.x, remove in 3.0. Keep
@@ -123,3 +125,30 @@ until this lands.
   (the `From<DiError>` mapping landed; codegen is phase two).
 - Surface `Locked`/`CircularDependency` as first-class ABI codes in the
   next ABI-extending release.
+- Add a `trybuild` dev-dependency to `dependency-injector-derive` for
+  compile-fail coverage. Nothing currently asserts on a derive *rejection*:
+  the new duplicate-`#[inject]`/`#[dep]` marker diagnostic is untested, and so
+  is every `to_compile_error()` arm in `Inject`, `Service`, and `TypedRequire`
+  — non-struct input, a struct with unnamed fields, and the field-type
+  mismatches (`#[inject]` on a non-`Arc<T>` field; `#[inject(optional)]` on a
+  non-`Option<Arc<T>>` field). `trybuild` would be dev-only on the derive
+  crate, so it does not touch the published dependency graph.
+- Propagate the `-1` error sentinel through the four language bindings.
+  `di_contains()` returns `-1` for an invalid argument (null container, null
+  or non-UTF-8 type name), but Python, Node, Go, and C# all test `result == 1`
+  and so collapse `-1` into `false` — callers cannot distinguish "not
+  registered" from "bad argument" without consulting `di_error_message()`.
+  The header documents this as a known limitation; the fix is per-binding
+  (raise/throw, or return a tri-state). `di_is_locked()` has the same
+  sentinel and is not yet bound anywhere, so it should be wired up correctly
+  from the start — as should the rest of the new verbs (`di_remove`,
+  `di_clear`, `di_lock`), none of which any binding exposes today.
+- Decide what to do about the inert CI cache keys. `Cargo.lock` is gitignored
+  repo-wide and no lockfile is tracked, so every
+  `hashFiles('**/Cargo.lock')` component (`ci.yml` check/clippy/test/features/
+  doc/msrv/bindings, `bench.yml`) and every `hashFiles('fuzz/Cargo.lock')`
+  component (`ci.yml`, `nightly-fuzz.yml`) matches no files and expands to the
+  empty string — the keys never vary, so the caches never invalidate on a
+  dependency change. Either commit lockfiles for CI-key purposes (the usual
+  library-crate tradeoff) or drop the fiction and key on something that
+  actually changes.

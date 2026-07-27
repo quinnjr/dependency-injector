@@ -49,7 +49,25 @@ export DI_LIBRARY_PATH=$(pwd)/target/release/libdependency_injector.so
 |----------|-------------|
 | `DI_LIBRARY_PATH` | Custom path to native library |
 | `DI_SKIP_DOWNLOAD` | Skip automatic download (for CI/offline) |
-| `DI_GITHUB_TOKEN` | GitHub token for rate limiting |
+| `DI_GITHUB_TOKEN` | GitHub token for rate limiting and private-repo access. When set, assets are fetched through the `api.github.com` asset endpoint so the token authenticates the download; it is re-evaluated per redirect hop and is never sent to download hosts (e.g. `objects.githubusercontent.com`) |
+| `DI_REQUIRE_CHECKSUM` | When set (non-empty), a release with no `SHA256SUMS` asset is a hard failure (exit 1) instead of a warning |
+
+### Install Failure Policy
+
+The postinstall script distinguishes availability problems (soft) from
+integrity problems (hard):
+
+| Situation | Behaviour |
+|-----------|-----------|
+| Release metadata fetch fails, platform asset missing from the release, or the download fails | Warn, print build-from-source instructions, **exit 0** so the install completes |
+| Checksum mismatch, `SHA256SUMS` present but with no entry for the asset, or an existing `SHA256SUMS` asset cannot be fetched | **Exit 1**; the downloaded file is deleted |
+| Release has no `SHA256SUMS` asset at all (pre-checksum release) | Warn and proceed — unless `DI_REQUIRE_CHECKSUM` is set, then **exit 1** |
+| Unsupported platform | **Exit 1** |
+
+Downloads are staged at `<output>.download.<pid>` and only renamed into place after
+the checksum verifies, so the library path never holds an unverified file. A
+soft failure means no native library was installed — `require`/`import` of the
+package will fail until one is built or fetched.
 
 ## Quick Start
 
