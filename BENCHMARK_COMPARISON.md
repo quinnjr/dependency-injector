@@ -10,9 +10,12 @@ Comprehensive benchmarks comparing Rust `dependency-injector` against popular Go
 - Go: 1.26.5
 - Node.js: v26.5.0
 - Python: 3.14.6
-- C#: **not re-measured** — no .NET SDK on this machine (see caveats below)
+- C#: .NET SDK 8.0.29 (runtime 8.0.29)
 
-All suites were run sequentially on an otherwise idle machine, never in parallel.
+**Every language suite in this document — Rust, Go, Node.js, Python and C# — was measured on
+this one machine, in this one session.** All suites were run sequentially on an otherwise idle
+machine, never in parallel, which is what makes the cross-language tables below directly
+comparable.
 
 ---
 
@@ -21,8 +24,8 @@ All suites were run sequentially on an otherwise idle machine, never in parallel
 Three things you need to know before comparing anything in this document.
 
 1. **The environment changed.** The previous revision of this document was measured
-   under WSL2; everything here (except C#) was measured on native Linux with newer
-   toolchains. **Figures are not comparable to the previous revision of this document.**
+   under WSL2; everything here was measured on native Linux with newer toolchains.
+   **Figures are not comparable to the previous revision of this document.**
    Do not read a change between revisions as a performance regression or improvement in
    any library.
 
@@ -46,9 +49,6 @@ Three things you need to know before comparing anything in this document.
   inversify mixed workload **53.96 µs** vs **48.47 µs**. All Node figures below come from a
   single run so the columns are mutually consistent; treat inversify in particular as
   approximate to within roughly a factor of two.
-- **`†` marks C# figures carried over from the earlier WSL2 run** (December 2025, .NET 8.0).
-  They were **not** re-measured and are **not directly comparable** to the rest of this
-  document.
 - **`‡` marks the Go uber/dig concurrent-reads cell**, which was previously unmeasurable
   because of a bug in the benchmark itself. The bug was found and fixed in this revision;
   the cell now carries a real figure. See the footnote in that section.
@@ -370,14 +370,6 @@ the three Python libraries.
 
 ## C# DI Libraries Compared
 
-> **† All C# figures in this section are from the earlier WSL2 run (December 2025,
-> .NET 8.0).** They could not be re-measured on 2026-07-27
-> because no .NET SDK is installed on this machine. They are **not directly comparable**
-> to the Go, Node.js, Python and Rust figures elsewhere in this document, which were
-> measured on native Linux with newer toolchains. The Rust rows in these tables *are*
-> current, so every C#-vs-Rust ratio below spans two different environments — read them as
-> indicative only.
-
 | Library | Version | Type | Description |
 |---------|---------|------|-------------|
 | **Manual DI** | - | Baseline | Direct object instantiation |
@@ -392,37 +384,53 @@ the three Python libraries.
 
 | Library | Language | Time (ns) | vs Fastest |
 |---------|----------|-----------|------------|
-| **Rust dependency-injector** | Rust | **9.30** | **1.0x** |
-| C# Dictionary † | C# | 142 | 15.3x |
-| C# MS.Extensions.DI † | C# | 208 | 22.4x |
-| C# Manual † | C# | 393 | 42.3x |
+| C# Manual | C# | 5.09 | 1.0x |
+| **Rust dependency-injector** | Rust | **9.30** | 1.8x |
+| C# Dictionary | C# | 33.53 | 6.6x |
+| C# MS.Extensions.DI | C# | 44.62 | 8.8x |
+
+The `vs Fastest` baseline is C#'s manual DI, which the JIT reduces to a direct field read —
+a floor, not a container.
 
 ### 2. Deep Dependency Chain (4 levels)
 
 | Library | Language | Time (ns) | vs Fastest |
 |---------|----------|-----------|------------|
-| C# Manual † | C# | 4 | 1.0x |
-| **Rust dependency-injector** | Rust | **9.23** | 2.3x |
-| C# Dictionary † | C# | 64 | 16x |
-| C# MS.Extensions.DI † | C# | 237 | 59x |
+| C# Manual | C# | 2.44 | 1.0x |
+| **Rust dependency-injector** | Rust | **9.23** | 3.8x |
+| C# Dictionary | C# | 34.40 | 14.1x |
+| C# MS.Extensions.DI | C# | 43.53 | 17.8x |
 
 ### 3. Container Creation
 
 | Library | Language | Time | vs Fastest |
 |---------|----------|------|------------|
-| C# Dictionary † | C# | 203 ns | 1.0x |
-| C# Manual † | C# | 1,604 ns | 7.9x |
-| C# MS.Extensions.DI † | C# | 13,580 ns | 66.9x |
+| C# Manual | C# | 68.82 ns | 1.0x |
+| C# Dictionary | C# | 106.27 ns | 1.5x |
+| C# MS.Extensions.DI | C# | 2.63 µs | 38.1x |
 | **Rust dependency-injector** | Rust | not re-measured § | — |
 
 ### 4. Mixed Workload (100 operations)
 
 | Library | Language | Time (µs) | vs Fastest |
 |---------|----------|-----------|------------|
-| **Rust dependency-injector** | Rust | **1.60** | **1.0x** |
-| C# Manual † | C# | 3.4 | 2.1x |
-| C# Dictionary † | C# | 30.1 | 18.8x |
-| C# MS.Extensions.DI † | C# | 31.2 | 19.5x |
+| C# Manual | C# | 0.55 | 1.0x |
+| **Rust dependency-injector** | Rust | **1.60** | 2.9x |
+| C# Dictionary | C# | 4.08 | 7.4x |
+| C# MS.Extensions.DI | C# | 5.03 | 9.1x |
+
+**Key Insights:**
+- MS.Extensions.DI resolves in 44.62 ns and is essentially depth-insensitive (43.53 ns for
+  the 4-level chain) — the .NET container is competitive with the mainstream containers in
+  the other languages, faster than Node.js inversify (57.90 ns) and Go samber/do (199.9 ns)
+  on a singleton lookup
+- The C# `Dictionary` baseline (33.53 ns) is only ~1.3x faster than the full MS.Extensions.DI
+  container, so the framework container costs little over a raw map on the resolve path
+- Container construction is where MS.Extensions.DI is expensive relative to itself: 2.63 µs
+  versus 68.82 ns for manual wiring, a 38x gap — but that is a one-time startup cost, and it
+  is cheaper than Node.js inversify (11.71 µs) or Python `dependency-injector` (93.60 µs)
+- Rust `dependency-injector` (9.30 ns) is still 4.8x faster than MS.Extensions.DI on a
+  singleton and 3.1x faster on the mixed workload (1.60 µs vs 5.03 µs), with zero allocations
 
 ---
 
@@ -433,29 +441,30 @@ the three Python libraries.
 Fastest measured entry per language, with the approach named. Manual/stdlib baselines are
 compiler- or JIT-inlined and are floors rather than containers.
 
-| Operation | Go | Node.js | Python | C# † | Rust |
+| Operation | Go | Node.js | Python | C# | Rust |
 |-----------|-----|---------|--------|-----|------|
-| Singleton lookup | 0.1383 ns (manual) | 3.29 ns (manual) | 27.15 ns (manual) | 142 ns (Dictionary) † | 7.94 ns (manual) / **9.30 ns (dependency-injector)** |
-| Dependency chain | 0.1128 ns (manual) | 3.95 ns (manual) | 27.91 ns (manual) | 4 ns (Manual) † | 7.91 ns (manual) / **9.23 ns (dependency-injector)** |
-| Container creation | 0.1201 ns (sync.Map) | 30.71 ns (Map) | 60.25 ns (dict) | 203 ns (Dictionary) † | not re-measured § |
-| Mixed workload (100 ops) | 1.67 µs (sync.Map) | 0.14 µs (manual) ‖ | 4.70 µs (dict) | 3.4 µs (Manual) † | **1.60 µs (dependency-injector)** |
+| Singleton lookup | 0.1383 ns (manual) | 3.29 ns (manual) | 27.15 ns (manual) | 5.09 ns (Manual) | 7.94 ns (manual) / **9.30 ns (dependency-injector)** |
+| Dependency chain | 0.1128 ns (manual) | 3.95 ns (manual) | 27.91 ns (manual) | 2.44 ns (Manual) | 7.91 ns (manual) / **9.23 ns (dependency-injector)** |
+| Container creation | 0.1201 ns (sync.Map) | 30.71 ns (Map) | 60.25 ns (dict) | 68.82 ns (Manual) | not re-measured § |
+| Mixed workload (100 ops) | 1.67 µs (sync.Map) | 0.14 µs (manual) ‖ | 4.70 µs (dict) | 0.55 µs (Manual) | **1.60 µs (dependency-injector)** |
 
-† C# column: earlier WSL2 run (.NET 8.0, December 2025), **not** re-measured and **not
-directly comparable** to the other columns.
 ‖ The Node manual mixed-workload figure is partly optimised away by V8 — see the Node.js
 mixed-workload note above.
 
 ### Popular DI Library Comparison
 
-| Operation | Go samber/do | Node.js inversify | Python dep-injector | C# MS.Extensions.DI † | Rust dependency-injector |
+| Operation | Go samber/do | Node.js inversify | Python dep-injector | C# MS.Extensions.DI | Rust dependency-injector |
 |-----------|--------------|-------------------|---------------------|---------------------|--------------------------|
-| Singleton lookup | 199.9 ns | 57.90 ns | 56.05 ns | 208 ns † | **9.30 ns** |
-| Dependency chain | 211.7 ns | 42.34 ns | 54.58 ns | 237 ns † | **9.23 ns** |
-| Container creation | 2.32 µs | 11.71 µs | 93.60 µs | 13.6 µs † | not re-measured § |
-| Mixed workload (100 ops) | 29.98 µs | 48.47 µs | 470.70 µs | 31 µs † | **1.60 µs** |
+| Singleton lookup | 199.9 ns | 57.90 ns | 56.05 ns | 44.62 ns | **9.30 ns** |
+| Dependency chain | 211.7 ns | 42.34 ns | 54.58 ns | 43.53 ns | **9.23 ns** |
+| Container creation | 2.32 µs | 11.71 µs | 93.60 µs | 2.63 µs | not re-measured § |
+| Mixed workload (100 ops) | 29.98 µs | 48.47 µs | 470.70 µs | 5.03 µs | **1.60 µs** |
 
-† C# column: earlier WSL2 run (.NET 8.0, December 2025), **not** re-measured and **not
-directly comparable** to the other columns.
+Among the four mainstream framework containers, MS.Extensions.DI is the fastest on singleton
+lookup (44.62 ns) and by a wide margin on the mixed workload (5.03 µs, 6x ahead of the next
+best); inversify edges it on the deep chain (42.34 ns vs 43.53 ns) and samber/do is marginally
+cheaper to construct (2.32 µs vs 2.63 µs). Rust `dependency-injector` is faster than all four
+on every row it appears in.
 
 The samber/do, inversify and Python dependency-injector mixed-workload figures include
 real scope creation for the first time in this revision — see
@@ -494,10 +503,11 @@ manual DI in Rust. The mechanisms:
 5. **Inlined hot paths** - Critical code paths optimized by LLVM
 
 It does *not* beat the inlined baselines on a singleton lookup — Go manual (0.1383 ns),
-Node.js manual (3.29 ns), Node.js Map (7.34 ns), Rust manual (7.94 ns) and Go `sync.Map`
-(8.28 ns) all resolve faster, and none of them is a container: they are direct field or
-raw-map accesses with no lifetime management, scoping, or type registry in the path. Among
-actual DI containers, `dependency-injector` is the fastest measured in every language here.
+Node.js manual (3.29 ns), C# manual (5.09 ns), Node.js Map (7.34 ns), Rust manual (7.94 ns)
+and Go `sync.Map` (8.28 ns) all resolve faster, and none of them is a container: they are
+direct field or raw-map accesses with no lifetime management, scoping, or type registry in
+the path. Among actual DI containers, `dependency-injector` is the fastest measured in every
+language here.
 
 ### Performance Rankings
 
@@ -505,50 +515,51 @@ actual DI containers, `dependency-injector` is the fastest measured in every lan
 
 1. Go manual — 0.1383 ns *(baseline, inlined)*
 2. Node.js manual — 3.29 ns *(baseline, inlined)*
-3. Node.js Map — 7.34 ns
-4. Rust manual — 7.94 ns *(baseline)*
-5. Go sync.Map — 8.28 ns
-6. **Rust dependency-injector — 9.30 ns** *(fastest container measured)*
-7. Go map+RWMutex — 11.64 ns
-8. Rust shaku — 19.85 ns
-9. Rust HashMap+RwLock — 20.14 ns
-10. Rust DashMap — 20.57 ns
-11. Rust ferrous-di — 22.91 ns
-12. Node.js awilix — 26.51 ns
-13. Python manual — 27.15 ns
-14. Python dict — 40.34 ns
-15. Python dependency-injector — 56.05 ns
-16. Node.js inversify — 57.90 ns
-17. Go goioc/di — 61.05 ns
-18. C# Dictionary † — 142 ns
-19. Go samber/do — 199.9 ns
-20. C# MS.Extensions.DI † — 208 ns
-21. Python punq — 396.70 ns
-22. Go uber/dig — 922.7 ns
-23. Python injector — 968.12 ns
+3. C# manual — 5.09 ns *(baseline, inlined)*
+4. Node.js Map — 7.34 ns
+5. Rust manual — 7.94 ns *(baseline)*
+6. Go sync.Map — 8.28 ns
+7. **Rust dependency-injector — 9.30 ns** *(fastest container measured)*
+8. Go map+RWMutex — 11.64 ns
+9. Rust shaku — 19.85 ns
+10. Rust HashMap+RwLock — 20.14 ns
+11. Rust DashMap — 20.57 ns
+12. Rust ferrous-di — 22.91 ns
+13. Node.js awilix — 26.51 ns
+14. Python manual — 27.15 ns
+15. C# Dictionary — 33.53 ns
+16. Python dict — 40.34 ns
+17. C# MS.Extensions.DI — 44.62 ns
+18. Python dependency-injector — 56.05 ns
+19. Node.js inversify — 57.90 ns
+20. Go goioc/di — 61.05 ns
+21. Go samber/do — 199.9 ns
+22. Python punq — 396.70 ns
+23. Go uber/dig — 922.7 ns
+24. Python injector — 968.12 ns
 
 **Mixed Workload (100 ops):**
 
 1. Node.js manual — 0.14 µs ‖
 2. Node.js Map — 0.26 µs ‖
-3. **Rust dependency-injector — 1.60 µs**
-4. Go sync.Map — 1.67 µs
-5. Rust shaku — 1.85 µs
-6. Go map+RWMutex — 1.96 µs
-7. Rust ferrous-di — 2.34 µs
-8. C# Manual † — 3.4 µs
-9. Python dict — 4.70 µs
-10. Python manual — 4.71 µs
-11. Rust DashMap — 5.44 µs
-12. Node.js awilix — 9.59 µs
-13. Go samber/do — 29.98 µs
-14. C# Dictionary / MS.Extensions.DI † — 30.1 / 31.2 µs
-15. Node.js inversify — 48.47 µs
-16. Python punq — 53.15 µs
-17. Python injector — 110.11 µs
-18. Python dependency-injector — 470.70 µs
+3. C# Manual — 0.55 µs
+4. **Rust dependency-injector — 1.60 µs**
+5. Go sync.Map — 1.67 µs
+6. Rust shaku — 1.85 µs
+7. Go map+RWMutex — 1.96 µs
+8. Rust ferrous-di — 2.34 µs
+9. C# Dictionary — 4.08 µs
+10. Python dict — 4.70 µs
+11. Python manual — 4.71 µs
+12. C# MS.Extensions.DI — 5.03 µs
+13. Rust DashMap — 5.44 µs
+14. Node.js awilix — 9.59 µs
+15. Go samber/do — 29.98 µs
+16. Node.js inversify — 48.47 µs
+17. Python punq — 53.15 µs
+18. Python injector — 110.11 µs
+19. Python dependency-injector — 470.70 µs
 
-† WSL2-era figure, not re-measured.
 ‖ Partly optimised away by V8; treat as a lower bound.
 
 ### When to Use Each
@@ -585,12 +596,18 @@ actual DI containers, `dependency-injector` is the fastest measured in every lan
 - **injector (Google)**: Slowest resolution measured in Python (~968 ns); use it when you
   need its feature set and resolution cost is not on your hot path
 
-#### C# DI Libraries †
-- **Manual/Dictionary**: When you need maximum speed in hot paths
-- **MS.Extensions.DI**: Standard choice for ASP.NET Core applications (~208 ns †,
-  full-featured)
-- For high-performance scenarios, consider the Rust FFI bindings
-- † All C# guidance above rests on the December 2025 WSL2 run; re-measure before relying on it
+#### C# DI Libraries
+- **Manual**: The fastest option measured in C# (5.09 ns resolve, 68.82 ns to construct) —
+  worth it only where the wiring is small enough to maintain by hand
+- **Dictionary**: 33.53 ns per lookup, barely ahead of the full container — rarely worth
+  giving up MS.Extensions.DI's lifetimes and scoping for
+- **MS.Extensions.DI**: The default choice for ASP.NET Core, and it earns it — 44.62 ns per
+  resolve, flat with dependency depth (43.53 ns at 4 levels), 5.03 µs for the mixed workload,
+  and 2.63 µs to build the container. It is the fastest of the four mainstream framework
+  containers benchmarked here on singleton resolution and mixed workload
+- Rust `dependency-injector` is still 4.8x faster per resolve and allocation-free, so the
+  Rust FFI bindings remain worthwhile where DI is genuinely on the hot path — but for typical
+  ASP.NET Core request handling, MS.Extensions.DI is not the bottleneck
 
 ---
 
@@ -641,6 +658,6 @@ dotnet run -c Release
 
 ---
 
-*Go, Node.js, Python and Rust benchmarks run 2026-07-27 on Intel i9-13900K, native Linux
-7.1.4-arch1-1, Rust 1.97.1, Go 1.26.5, Node.js v26.5.0, Python 3.14.6.*
-*C# figures (†) are from the earlier run: WSL2, .NET 8.0, December 2025 — not re-measured.*
+*All benchmarks — Go, Node.js, Python, C# and Rust — run 2026-07-27 on Intel i9-13900K,
+native Linux 7.1.4-arch1-1, Rust 1.97.1, Go 1.26.5, Node.js v26.5.0, Python 3.14.6,
+.NET SDK 8.0.29.*

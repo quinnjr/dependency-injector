@@ -330,8 +330,10 @@ public class Program
         Console.WriteLine("============================\n");
 
         Console.WriteLine("For comparison with Rust dependency-injector:");
-        Console.WriteLine("- Rust singleton resolution: ~17-32 ns");
-        Console.WriteLine("- Rust mixed workload (100 ops): ~2.2 µs");
+        Console.WriteLine("- Rust singleton resolution: ~9.30 ns");
+        Console.WriteLine("- Rust mixed workload (100 ops): ~1.60 µs");
+        Console.WriteLine("  (measured on the machine described in BENCHMARK_COMPARISON.md,");
+        Console.WriteLine("   not re-measured live here)");
         Console.WriteLine();
         Console.WriteLine("Best C# times from this benchmark:");
         Console.WriteLine($"- Singleton resolution: {singletonResults[0].AvgNs:F0} ns (manual_di)");
