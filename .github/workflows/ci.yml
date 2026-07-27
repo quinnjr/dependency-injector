@@ -443,3 +443,127 @@ jobs:
                   print(f"OK   {path}")
           sys.exit(1 if failed else 0)
           PY
+
+  bench-go:
+    name: Go Benchmarks (smoke)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Install Go toolchain
+        uses: actions/setup-go@v6
+        with:
+          go-version: 'stable'
+          cache-dependency-path: benchmarks/go-comparison/go.sum
+
+      - name: Check formatting
+        working-directory: benchmarks/go-comparison
+        run: |
+          unformatted="$(gofmt -l .)"
+          if [ -n "$unformatted" ]; then
+            echo "::error::gofmt needs to run on: $unformatted"
+            exit 1
+          fi
+
+      - name: Vet
+        working-directory: benchmarks/go-comparison
+        run: go vet ./...
+
+      # Executes every benchmark once. Catches compile errors and deterministic
+      # crashes cheaply (~1s), but note it does NOT catch concurrency bugs: a
+      # single iteration never builds enough parallelism. That is the next
+      # step's job.
+      - name: Smoke-run every benchmark
+        working-directory: benchmarks/go-comparison
+        run: go test -run=XXX -bench=. -benchtime=1x ./...
+
+      # The load-bearing check. BenchmarkConcurrentReads/uber_dig once aborted
+      # the whole test binary with "fatal error: concurrent map read and map
+      # write", which also killed every benchmark scheduled after it.
+      #
+      # Verified against that bug by reverting the fix: the race detector exits
+      # non-zero, while the smoke step above and even a plain -benchtime=10000x
+      # run both still exit 0. Go's built-in concurrent-map detection is
+      # opportunistic, so -race is the only reliable gate here — do not drop it.
+      - name: Race-check the concurrency benchmarks
+        working-directory: benchmarks/go-comparison
+        run: go test -run=XXX -bench=BenchmarkConcurrentReads -benchtime=100x -race ./...
+
+  bench-node:
+    name: Node Benchmarks (smoke)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: pnpm/action-setup@v6
+        with:
+          version: 10
+
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 22
+
+      - name: Install dependencies
+        working-directory: benchmarks/nodejs-comparison
+        run: pnpm install --frozen-lockfile
+
+      - name: Typecheck
+        working-directory: benchmarks/nodejs-comparison
+        run: pnpm exec tsc --noEmit -p tsconfig.json
+
+      # DI_BENCH_SMOKE collapses every benchmark to a couple of iterations, so
+      # this executes each code path in about a second. The printed timings are
+      # meaningless -- the gate is "does it still run", not "how fast".
+      - name: Smoke-run benchmarks
+        working-directory: benchmarks/nodejs-comparison
+        env:
+          DI_BENCH_SMOKE: '1'
+        run: pnpm bench
+
+  bench-python:
+    name: Python Benchmarks (smoke)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+
+      - name: Install benchmark dependencies
+        run: python -m pip install --quiet dependency-injector injector punq
+
+      - name: Syntax check
+        run: python -m compileall -q benchmarks/python-comparison/benchmark.py
+
+      # See the note on bench-node: smoke mode, not a measurement.
+      - name: Smoke-run benchmarks
+        working-directory: benchmarks/python-comparison
+        env:
+          DI_BENCH_SMOKE: '1'
+        run: python benchmark.py
+
+  bench-csharp:
+    name: C# Benchmarks (smoke)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: actions/setup-dotnet@v5
+        with:
+          dotnet-version: '8.0.x'
+
+      - name: Build
+        working-directory: benchmarks/csharp-comparison
+        run: dotnet build --configuration Release
+
+      # See the note on bench-node: smoke mode, not a measurement.
+      - name: Smoke-run benchmarks
+        working-directory: benchmarks/csharp-comparison
+        env:
+          DI_BENCH_SMOKE: '1'
+        run: dotnet run --configuration Release --no-build
