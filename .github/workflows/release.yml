@@ -54,13 +54,17 @@ jobs:
       - name: Check crates.io for already-published versions
         id: check
         run: |
-          # Mirrors the check in scripts/publish.sh: a published version returns
+          # Mirrors the check in scripts/publish.sh — both are superseded by
+          # release-plz; see ROADMAP.md item 7. A published version returns
           # a "version" field from the crates.io API, an unknown one returns "errors".
           check_published() {
             local crate_name=$1
             local version=$2
             local response
-            response=$(curl -s "https://crates.io/api/v1/crates/${crate_name}/${version}")
+            if ! response=$(curl -s "https://crates.io/api/v1/crates/${crate_name}/${version}"); then
+              echo "::warning::crates.io API unreachable — proceeding to publish (cargo will reject duplicates)"
+              return 1  # Treat as not published; cargo publish is the backstop
+            fi
             if echo "$response" | grep -q '"version"' && ! echo "$response" | grep -q '"errors"'; then
               return 0  # Already published
             else
@@ -136,8 +140,11 @@ jobs:
           DOCS=$(echo "$COMMITS" | grep -E "^- docs" || true)
           OTHER=$(echo "$COMMITS" | grep -vE "^- (feat|fix|docs)" || true)
 
+          # Random heredoc delimiter (per GitHub's docs) so commit messages
+          # cannot terminate the block early and inject extra outputs.
+          delimiter="$(openssl rand -hex 8)"
           {
-            echo "changelog<<EOF"
+            echo "changelog<<${delimiter}"
             echo "## What's Changed"
             echo ""
             if [ -n "$FEATURES" ]; then
@@ -160,7 +167,7 @@ jobs:
               echo "$OTHER"
               echo ""
             fi
-            echo "EOF"
+            echo "${delimiter}"
           } >> "$GITHUB_OUTPUT"
 
       - name: Create GitHub Release

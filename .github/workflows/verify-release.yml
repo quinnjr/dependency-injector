@@ -24,17 +24,23 @@ jobs:
     steps:
       - name: Determine version
         id: version
+        env:
+          # Interpolated via env rather than directly in the script so
+          # attacker-controllable values cannot inject shell commands.
+          EVENT_NAME: ${{ github.event_name }}
+          INPUT_VERSION: ${{ github.event.inputs.version }}
+          HEAD_BRANCH: ${{ github.event.workflow_run.head_branch }}
         run: |
-          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
-            VERSION="${{ github.event.inputs.version }}"
+          if [ "$EVENT_NAME" = "workflow_dispatch" ]; then
+            VERSION="$INPUT_VERSION"
           else
             # The Release workflow runs on tag pushes, so head_branch holds
             # the tag name (e.g. v2.0.0).
-            VERSION="${{ github.event.workflow_run.head_branch }}"
+            VERSION="$HEAD_BRANCH"
           fi
           VERSION="${VERSION#v}"
-          if [ -z "$VERSION" ]; then
-            echo "::error::Could not determine the release version"
+          if ! printf '%s\n' "$VERSION" | grep -Eq '^v?[0-9]+\.[0-9]+\.[0-9]+$'; then
+            echo "::error::Invalid or missing release version: '${VERSION}'"
             exit 1
           fi
           echo "Verifying release v${VERSION}"
@@ -80,8 +86,8 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           GH_REPO: ${{ github.repository }}
+          VERSION: ${{ needs.resolve.outputs.version }}
         run: |
-          VERSION="${{ needs.resolve.outputs.version }}"
           EXPECTED="libdependency_injector-linux-x64.so libdependency_injector-linux-arm64.so libdependency_injector-darwin-x64.dylib libdependency_injector-darwin-arm64.dylib dependency_injector-win32-x64.dll"
 
           # Retry: the Build Native Libraries workflow uploads assets in
@@ -109,3 +115,18 @@ jobs:
           echo "$ASSETS"
           echo "::error::Missing expected native assets on release v${VERSION}:${MISSING}"
           exit 1
+
+      - name: Verify asset checksums
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+          VERSION: ${{ needs.resolve.outputs.version }}
+        run: |
+          # End-to-end integrity check: download the published checksum
+          # manifest plus one representative asset and verify it matches.
+          mkdir -p checksum-verify
+          cd checksum-verify
+          gh release download "v${VERSION}" \
+            --pattern 'SHA256SUMS' \
+            --pattern 'libdependency_injector-linux-x64.so'
+          sha256sum --check --ignore-missing SHA256SUMS

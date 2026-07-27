@@ -27,6 +27,7 @@ fi
 echo "${GREEN}✔ All tests passed${NC}"
 
 # 2. Run clippy with strict settings
+# KEEP IN SYNC with the justfile `lint` recipe clippy flag list
 echo ""
 echo "${YELLOW}▸ Running strict clippy checks...${NC}"
 if ! cargo clippy --all-targets --all-features -- \

@@ -9,6 +9,8 @@
 //! All three derives accept `#[inject]` and `#[dep]` (and their `(optional)`
 //! forms) as exact aliases for marking dependency fields. By convention,
 //! `Inject` uses `#[inject]` while `Service` and `TypedRequire` use `#[dep]`.
+//! Each field takes *exactly one* marker; putting more than one
+//! `#[inject]`/`#[dep]` attribute on the same field is a compile error.
 //!
 //! # Inject Example
 //!
@@ -81,7 +83,9 @@ use syn::{Attribute, Data, DeriveInput, Fields, Type, parse_macro_input};
 /// `#[dep]` and `#[dep(optional)]` are accepted as exact aliases of
 /// `#[inject]` and `#[inject(optional)]` respectively, so the same field
 /// annotations work across every derive in this crate. `#[inject]` is the
-/// conventional spelling for this macro.
+/// conventional spelling for this macro. Each field must carry exactly one
+/// marker: a second `#[inject]`/`#[dep]` on the same field is a compile
+/// error.
 ///
 /// # Generated Methods
 ///
@@ -136,7 +140,10 @@ pub fn derive_inject(input: TokenStream) -> TokenStream {
         let field_name = field.ident.as_ref().unwrap();
         let field_type = &field.ty;
 
-        let inject_attr = find_dep_attr(&field.attrs);
+        let inject_attr = match find_dep_attr(&field.attrs) {
+            Ok(attr) => attr,
+            Err(err) => return err.to_compile_error().into(),
+        };
 
         match inject_attr {
             Some(DepAttr::Required) => {
@@ -204,31 +211,45 @@ enum DepAttr {
     Optional,
 }
 
-/// Find and parse a dependency-marker attribute on a field.
+/// Find and parse the dependency-marker attribute on a field.
 ///
 /// `#[inject]` and `#[dep]` are exact aliases, as are `#[inject(optional)]`
 /// and `#[dep(optional)]`. Every derive in this crate accepts both spellings
 /// and treats them identically.
-fn find_dep_attr(attrs: &[Attribute]) -> Option<DepAttr> {
+///
+/// A field must carry *at most one* marker: a second `#[inject]`/`#[dep]`
+/// attribute on the same field yields an error (spanning the duplicate
+/// attribute) rather than being silently ignored.
+fn find_dep_attr(attrs: &[Attribute]) -> syn::Result<Option<DepAttr>> {
+    let mut found: Option<DepAttr> = None;
+
     for attr in attrs {
-        if attr.path().is_ident("inject") || attr.path().is_ident("dep") {
-            // Bare `#[inject]` / `#[dep]` means required
-            if attr.meta.require_path_only().is_ok() {
-                return Some(DepAttr::Required);
-            }
-
-            // Parse `#[inject(optional)]` / `#[dep(optional)]`
-            if let Ok(nested) = attr.parse_args::<syn::Ident>() {
-                if nested == "optional" {
-                    return Some(DepAttr::Optional);
-                }
-            }
-
-            // Default to required
-            return Some(DepAttr::Required);
+        if !(attr.path().is_ident("inject") || attr.path().is_ident("dep")) {
+            continue;
         }
+
+        if found.is_some() {
+            return Err(syn::Error::new_spanned(
+                attr,
+                "duplicate dependency marker: use exactly one of #[inject]/#[dep] \
+                 (they are aliases)",
+            ));
+        }
+
+        // Bare `#[inject]` / `#[dep]` means required; only the
+        // `(optional)` argument selects optional injection.
+        let parsed = if attr.meta.require_path_only().is_ok() {
+            DepAttr::Required
+        } else {
+            match attr.parse_args::<syn::Ident>() {
+                Ok(nested) if nested == "optional" => DepAttr::Optional,
+                _ => DepAttr::Required,
+            }
+        };
+        found = Some(parsed);
     }
-    None
+
+    Ok(found)
 }
 
 /// Extract T from Arc<T>
@@ -278,7 +299,9 @@ fn extract_option_arc_inner_type(ty: &Type) -> Option<&Type> {
 /// `#[inject]` and `#[inject(optional)]` are accepted as exact aliases of
 /// `#[dep]` and `#[dep(optional)]` respectively, so the same field
 /// annotations work across every derive in this crate. `#[dep]` is the
-/// conventional spelling for this macro.
+/// conventional spelling for this macro. Each field must carry exactly one
+/// marker: a second `#[dep]`/`#[inject]` on the same field is a compile
+/// error.
 ///
 /// Fields without a dependency marker use `Default::default()`.
 ///
@@ -356,7 +379,10 @@ pub fn derive_service(input: TokenStream) -> TokenStream {
         let field_name = field.ident.as_ref().unwrap();
         let field_type = &field.ty;
 
-        let dep_attr = find_dep_attr(&field.attrs);
+        let dep_attr = match find_dep_attr(&field.attrs) {
+            Ok(attr) => attr,
+            Err(err) => return err.to_compile_error().into(),
+        };
 
         match dep_attr {
             Some(DepAttr::Required) => {
@@ -452,7 +478,9 @@ pub fn derive_service(input: TokenStream) -> TokenStream {
 /// `#[inject]` is accepted as an exact alias of `#[dep]` (and
 /// `#[inject(optional)]` of `#[dep(optional)]`), so the same field
 /// annotations work across every derive in this crate. `#[dep]` is the
-/// conventional spelling for this macro.
+/// conventional spelling for this macro. Each field must carry exactly one
+/// marker: a second `#[dep]`/`#[inject]` on the same field is a compile
+/// error.
 ///
 /// Fields without a dependency marker, and fields marked
 /// `#[dep(optional)]`/`#[inject(optional)]`, are not included in the
@@ -517,7 +545,10 @@ pub fn derive_typed_require(input: TokenStream) -> TokenStream {
 
     for field in fields {
         let field_type = &field.ty;
-        let dep_attr = find_dep_attr(&field.attrs);
+        let dep_attr = match find_dep_attr(&field.attrs) {
+            Ok(attr) => attr,
+            Err(err) => return err.to_compile_error().into(),
+        };
 
         if let Some(DepAttr::Required) = dep_attr {
             if let Some(inner) = extract_arc_inner_type(field_type) {

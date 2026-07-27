@@ -57,6 +57,10 @@ exclude = [
     "TODO.md",
     "CONTRIBUTING.md",
     "SECURITY.md",
+    "AGENTS.md",
+    "RELEASING.md",
+    "ROADMAP.md",
+    "justfile",
     "*.bak",
     "*.orig",
 ]

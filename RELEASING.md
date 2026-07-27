@@ -13,12 +13,18 @@ workflow. Nothing needs to be published from a laptop.
      - [ffi/nodejs/package.json](ffi/nodejs/package.json) (`version`)
      - [ffi/python/pyproject.toml](ffi/python/pyproject.toml) (`project.version` — the
        wheel workflow builds with whatever is in this file)
+     - [ffi/python/dependency_injector/__init__.py](ffi/python/dependency_injector/__init__.py)
+       (`__version__` — not derived from `pyproject.toml`; bump it by hand)
      - [ffi/csharp/DependencyInjector/DependencyInjector.csproj](ffi/csharp/DependencyInjector/DependencyInjector.csproj)
        (`<Version>` — the NuGet workflow also re-stamps this from the tag at build time)
      - The Go module needs no manifest bump; it is versioned by the git tag itself.
 2. **Update [CHANGELOG.md](CHANGELOG.md)** (Keep a Changelog format, one section per version).
 3. **Merge to `main`.** The `release.yml` validate job fails if the tag version does not
    match the root `Cargo.toml` version, so tag only after the bump has landed on `main`.
+4. **Wait for the `bindings-test` CI job to be green on the release commit** before any
+   binding package (npm, PyPI, NuGet) is published — whether by a tag workflow or by
+   `scripts/deploy-ffi.sh`. This gate exists because a koffi ownership bug once shipped
+   in a binding release without the code ever having been executed.
 
 ## 2. Tag and push
 

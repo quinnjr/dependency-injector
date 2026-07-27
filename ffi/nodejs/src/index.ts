@@ -137,7 +137,18 @@ const ServicePtr = koffi.pointer("DiService", koffi.opaque());
 // Raw pointer to a Rust-allocated, NUL-terminated string. Strings returned
 // through this type are owned by the native library and MUST be released
 // with di_string_free() after decoding.
-const CharPtr = koffi.pointer("char");
+//
+// This is deliberately an *opaque* pointer type rather than
+// `koffi.pointer("char")`: koffi auto-decodes `char*` return values into JS
+// strings (without transferring ownership), which would leak the native
+// allocation and make it impossible to pass the original pointer back to
+// `di_string_free()`. Freeing the auto-decoded JS string instead makes koffi
+// marshal it into a temporary buffer that Rust's `CString::from_raw` then
+// frees, corrupting the heap (SIGSEGV). With an opaque type koffi returns the
+// raw external pointer, `koffi.decode(ptr, "char", -1)` reads the string, and
+// `di_string_free()` receives the exact pointer Rust allocated. It also makes
+// passing a plain JS string to `di_string_free()` a type error.
+const RawCharPtr = koffi.pointer("RawChar", koffi.opaque());
 
 // Load the native library
 let lib: ReturnType<typeof koffi.load>;
@@ -170,13 +181,13 @@ const di_register_singleton_json = lib.func("di_register_singleton_json", "int",
   "str",
 ]);
 
-const di_resolve_json = lib.func("di_resolve_json", CharPtr, [ContainerPtr, "str"]);
+const di_resolve_json = lib.func("di_resolve_json", RawCharPtr, [ContainerPtr, "str"]);
 const di_contains = lib.func("di_contains", "int", [ContainerPtr, "str"]);
 const di_service_count = lib.func("di_service_count", "int64", [ContainerPtr]);
 
-const di_error_message = lib.func("di_error_message", CharPtr, []);
+const di_error_message = lib.func("di_error_message", RawCharPtr, []);
 const di_error_clear = lib.func("di_error_clear", "void", []);
-const di_string_free = lib.func("di_string_free", "void", [CharPtr]);
+const di_string_free = lib.func("di_string_free", "void", [RawCharPtr]);
 
 const di_version = lib.func("di_version", "str", []);
 

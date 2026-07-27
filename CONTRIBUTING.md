@@ -67,12 +67,12 @@ Unit tests go in `#[cfg(test)] mod tests` next to the code; integration tests in
 
 ```bash
 just lint
-# equivalent to:
-cargo fmt --all -- --check
-cargo clippy --all-targets --all-features -- -D warnings
 ```
 
-The pre-push hook additionally runs the stricter clippy pedantic set (above).
+`just lint` runs `cargo fmt --all -- --check` followed by clippy with the same strict
+pedantic set the pre-push hook enforces (`-D clippy::all -D clippy::pedantic` plus the
+curated `-A` allow list) — see the [justfile](justfile) for the exact flags. Passing
+`just lint` means the clippy step of pre-push will pass too.
 
 ## FFI: building the shared library
 

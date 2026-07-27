@@ -52,8 +52,12 @@ deprecate `Require`/`DeclaresDeps` in 2.x, remove in 3.0.
 ## 4. One scope concept (breaking → 3.0)
 
 **Evidence**: `Container::scope()`, `ScopedContainer` (pure delegation plus a
-`Scope` id), and `ScopePool` overlap; `ScopedContainer`/`ScopeBuilder` are
-exported but appear in no docs or examples.
+`Scope` id), and `ScopePool` overlap. `ScopedContainer` *is* used —
+`examples/scopes.rs`, `examples/logging.rs`, and the docs site's API page
+(`docs/src/app/pages/docs/api/api.html`) all reference it — but only as a
+pass-through for what `Container` already does; `ScopeBuilder` is exported and
+used nowhere. The case for consolidation is the redundant API surface, not
+disuse.
 
 **Sketch**: fold the `Scope` id into `Container` (it already tracks `depth`),
 reduce `ScopedContainer` to a deprecated alias in 2.x, remove in 3.0. Keep
@@ -98,9 +102,22 @@ workflows; git-cliff (built in) replaces both changelog generators; the
 local scripts retire. `RELEASING.md` documents the current canonical flow
 until this lands.
 
+- npm publish is not tag-triggered today: `scripts/deploy-ffi.sh` is the only
+  path that runs `pnpm publish` for `@pegasusheavy/dependency-injector`. Fold
+  a tag-driven npm publish into this release-plz work so all binding packages
+  ship from CI.
+
 ## 8. Remaining hardening follow-ups
 
 - TSAN job (needs `-Z build-std`; miri landed first).
+- Tighten the miri CI job once miri-clean. Baseline:
+  `cargo +nightly miri test --lib` currently reports ~95 errors
+  (predominantly memory-leak reports from thread-local hot-cache state and
+  FFI test allocations); re-run to re-baseline before tightening the CI job.
+- Configure `deny.toml` and drop the `|| true` on cargo-deny in
+  `audit.yml` (currently masks all failures).
+- Consider `try_lazy_async` returning `Result` for fallible async
+  initialization (the current factory can only fail by panicking).
 - Seed a `fuzz_lifecycle` corpus (currently cold-starts every run).
 - Generate the six per-language `DiErrorCode` enums from the header
   (the `From<DiError>` mapping landed; codegen is phase two).

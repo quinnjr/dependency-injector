@@ -14,8 +14,8 @@
 //! # Scope of async support
 //!
 //! Only *singleton initialization* is async: the factory passed to
-//! [`Container::lazy_async`] runs once, and every subsequent resolve returns
-//! the cached `Arc<T>`. Transients, sync lazy singletons, factories, and the
+//! [`Container::lazy_async`] runs to completion exactly once, and every
+//! subsequent resolve returns the cached `Arc<T>`. Transients, sync lazy singletons, factories, and the
 //! rest of the container API remain fully synchronous — there is no async
 //! transient or async scoped lifetime.
 //!
@@ -77,7 +77,10 @@ type BoxFuture<T> = Pin<Box<dyn Future<Output = T> + Send>>;
 /// Wrapper singleton registered by [`Container::lazy_async`].
 ///
 /// Holds the boxed async factory and a `tokio::sync::OnceCell` that caches
-/// the produced value, guaranteeing the factory completes at most once. The
+/// the produced value: once a factory run completes successfully, every
+/// later resolve returns the cached `Arc<T>` and the factory never runs
+/// again. (The factory itself may run more than once if an in-flight run is
+/// cancelled or panics — see [`Container::lazy_async`].) The
 /// wrapper is registered under its own `TypeId` through the regular
 /// [`Container::singleton`] API, which is what lets async registrations
 /// compose with scopes and parent-chain resolution.
@@ -102,7 +105,8 @@ type BoxFuture<T> = Pin<Box<dyn Future<Output = T> + Send>>;
 /// assert!(!container.contains::<Cache>());
 /// ```
 pub struct AsyncLazy<T> {
-    /// Caches the initialized value; ensures the factory completes at most once.
+    /// Caches the initialized value; ensures successful initialization
+    /// happens exactly once.
     cell: OnceCell<Arc<T>>,
     /// Produces the value on first resolution.
     factory: Box<dyn Fn() -> BoxFuture<Arc<T>> + Send + Sync>,
@@ -115,9 +119,19 @@ impl Container {
     /// resolution of `T`; the resulting value is then cached and shared (as
     /// `Arc<T>`) by every subsequent resolve. If several tasks race on the
     /// first resolution, exactly one runs the factory while the others await
-    /// its completion instead of blocking a thread. Should the initializing
-    /// future be cancelled mid-flight, one of the waiting tasks restarts the
-    /// factory, so initialization always completes exactly once.
+    /// its completion instead of blocking a thread.
+    ///
+    /// # Cancellation and panics
+    ///
+    /// Should the initializing future be cancelled mid-flight, one of the
+    /// waiting tasks (or the next resolver) restarts the factory. Likewise,
+    /// the underlying `tokio::sync::OnceCell` does not poison: if the
+    /// factory panics, the panic propagates to the caller whose resolve ran
+    /// it, and the next [`Container::get_async`] simply runs the factory
+    /// again. The factory may therefore run multiple times across cancelled
+    /// or panicked attempts, but *successful* initialization still completes
+    /// exactly once — the first value produced is cached and shared by every
+    /// later resolve.
     ///
     /// Note that `T` itself is *not* registered synchronously: `get::<T>()`
     /// will not find it. Resolve it with [`Container::get_async`].
@@ -327,6 +341,103 @@ mod tests {
 
         assert_eq!(from_async_path.name, "sync");
         assert!(Arc::ptr_eq(&from_async_path, &from_sync_path));
+    }
+
+    #[tokio::test]
+    async fn async_registration_wins_over_sync_singleton() {
+        let container = Container::new();
+        // Same type registered BOTH ways, with distinguishable values.
+        container.singleton(AsyncService { value: 1 });
+        container.lazy_async(|| async { AsyncService { value: 2 } });
+
+        // Documented precedence: `get_async` prefers the async registration.
+        let resolved = container.get_async::<AsyncService>().await.unwrap();
+        assert_eq!(
+            resolved.value, 2,
+            "get_async must resolve the async registration when both exist"
+        );
+
+        // The synchronous path is unaffected and still sees the sync singleton.
+        let sync = container.get::<AsyncService>().unwrap();
+        assert_eq!(sync.value, 1);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn cancelled_initialization_restarts_factory_and_completes_once() {
+        use std::time::Duration;
+        use tokio::sync::Notify;
+        use tokio::time::timeout;
+
+        #[derive(Clone, Debug)]
+        struct GatedService {
+            value: u32,
+        }
+
+        static ENTERED: AtomicU32 = AtomicU32::new(0);
+        static COMPLETED: AtomicU32 = AtomicU32::new(0);
+
+        // `gate` holds the factory mid-initialization; `factory_entered`
+        // tells the test the factory body is running. Both are explicit
+        // synchronization points - no sleeps.
+        let gate = Arc::new(Notify::new());
+        let factory_entered = Arc::new(Notify::new());
+
+        let container = Container::new();
+        {
+            let gate = Arc::clone(&gate);
+            let factory_entered = Arc::clone(&factory_entered);
+            container.lazy_async(move || {
+                let gate = Arc::clone(&gate);
+                let factory_entered = Arc::clone(&factory_entered);
+                async move {
+                    ENTERED.fetch_add(1, Ordering::SeqCst);
+                    factory_entered.notify_one();
+                    gate.notified().await;
+                    COMPLETED.fetch_add(1, Ordering::SeqCst);
+                    GatedService { value: 42 }
+                }
+            });
+        }
+
+        // Task A starts initialization and parks inside the factory at the gate.
+        let task_a = {
+            let container = container.clone();
+            tokio::spawn(async move { container.get_async::<GatedService>().await })
+        };
+        timeout(Duration::from_secs(5), factory_entered.notified())
+            .await
+            .expect("factory should enter before the failsafe timeout");
+        assert_eq!(ENTERED.load(Ordering::SeqCst), 1);
+
+        // Abort A mid-initialization. Awaiting the handle guarantees the
+        // factory future has been dropped before the test continues.
+        task_a.abort();
+        let join_err = task_a.await.expect_err("aborted task must not complete");
+        assert!(join_err.is_cancelled());
+        assert_eq!(COMPLETED.load(Ordering::SeqCst), 0);
+
+        // Release the gate (`Notify` stores the permit for the restarted
+        // run), then resolve from task B: the factory restarts and completes.
+        gate.notify_one();
+        let resolved = timeout(
+            Duration::from_secs(5),
+            container.get_async::<GatedService>(),
+        )
+        .await
+        .expect("restarted initialization should finish before the failsafe timeout")
+        .unwrap();
+
+        assert_eq!(resolved.value, 42);
+        assert_eq!(
+            ENTERED.load(Ordering::SeqCst),
+            2,
+            "factory should restart after the first run was cancelled"
+        );
+        assert_eq!(
+            COMPLETED.load(Ordering::SeqCst),
+            1,
+            "initialization should complete exactly once"
+        );
     }
 
     #[tokio::test]

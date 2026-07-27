@@ -43,6 +43,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   crate's major version line.
 - `DiError::NotFound`'s display message now explains likely causes and points
   at `debug_registrations()`.
+- Note on derive helper-attribute aliasing: because `#[inject]` and `#[dep]`
+  are now accepted interchangeably by `Inject`, `Service`, and `TypedRequire`,
+  a field attribute named `#[dep]` or `#[inject]` coming from *another* derive
+  ecosystem on the same struct could now be intercepted by these macros (rare
+  in practice). Duplicate markers on a single field are now a compile error.
+
+### Fixed
+- Node binding: `di_resolve_json`/`di_error_message` return values are now
+  bound as raw pointers; the previous koffi `char*` declaration auto-decoded
+  them and then freed a koffi-owned temporary, corrupting the heap on every
+  error-path resolve (caught by the new bindings-test CI job).
 
 ## [2.0.0] - 2026-07-21
 

@@ -1,6 +1,14 @@
 //! Tests that `#[inject]` and `#[dep]` are exact aliases across all three
 //! derive macros (`Inject`, `Service`, and `TypedRequire`).
 //!
+//! Every field below carries exactly one dependency marker; placing more
+//! than one `#[inject]`/`#[dep]` attribute on a single field is a compile
+//! error ("duplicate dependency marker: use exactly one of #[inject]/#[dep]
+//! (they are aliases)"). Asserting on that diagnostic requires a
+//! compile-fail harness such as `trybuild`, which is intentionally not a
+//! dependency of this crate, so the negative case is documented here and
+//! deferred rather than tested.
+//!
 //! Run with:
 //!   cargo test --test derive_aliases --features derive
 #![cfg(feature = "derive")]

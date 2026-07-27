@@ -105,6 +105,13 @@ jobs:
       - name: Run tests
         run: cargo test --all-features --verbose
 
+      - name: Run examples
+        if: runner.os == 'Linux'
+        run: |
+          for ex in scopes typed_builder performance; do
+            cargo run --example "$ex" --all-features
+          done
+
   test-features:
     name: Test Feature Combinations
     runs-on: ubuntu-latest
@@ -223,9 +230,11 @@ jobs:
         uses: dtolnay/rust-toolchain@nightly
 
       - name: Install cargo-fuzz
-        uses: taiki-e/install-action@cargo-fuzz
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-fuzz
 
-      - name: Cache cargo registry
+      - name: Cache fuzz build and corpus
         uses: actions/cache@v5
         with:
           path: |
@@ -233,12 +242,13 @@ jobs:
             ~/.cargo/git
             fuzz/target
             fuzz/corpus
+          # NOTE: this cache block is intentionally mirrored in nightly-fuzz.yml so both workflows share the warmed corpus.
           # The corpus grows every run, so the key includes the run id to force
           # a fresh save; restore-keys fall back to the newest previous cache.
-          key: ${{ runner.os }}-cargo-fuzz-${{ hashFiles('**/Cargo.lock') }}-${{ github.run_id }}
+          key: ${{ runner.os }}-fuzz-${{ hashFiles('fuzz/Cargo.lock') }}-${{ github.run_id }}
           restore-keys: |
-            ${{ runner.os }}-cargo-fuzz-${{ hashFiles('**/Cargo.lock') }}-
-            ${{ runner.os }}-cargo-fuzz-
+            ${{ runner.os }}-fuzz-${{ hashFiles('fuzz/Cargo.lock') }}-
+            ${{ runner.os }}-fuzz-
 
       - name: Run fuzz targets (30s each)
         run: |
@@ -317,7 +327,7 @@ jobs:
           pnpm test
 
       - name: Setup .NET
-        uses: actions/setup-dotnet@v6
+        uses: actions/setup-dotnet@v5
         with:
           dotnet-version: '8.0.x'
 
@@ -384,3 +394,40 @@ jobs:
         env:
           MIRIFLAGS: -Zmiri-disable-isolation
         run: cargo +nightly miri test --lib
+
+  lint-ci:
+    name: Lint CI Config
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Setup just
+        uses: extractions/setup-just@v2
+
+      - name: Justfile syntax check
+        run: just --list
+
+      - name: Validate workflow YAML
+        run: |
+          python3 - <<'PY'
+          import glob
+          import sys
+
+          import yaml
+
+          failed = False
+          for path in sorted(
+              glob.glob(".github/workflows/*.yml")
+              + glob.glob(".github/workflows/*.yaml")
+          ):
+              try:
+                  with open(path, encoding="utf-8") as fh:
+                      yaml.safe_load(fh)
+              except yaml.YAMLError as exc:
+                  print(f"FAIL {path}: {exc}")
+                  failed = True
+              else:
+                  print(f"OK   {path}")
+          sys.exit(1 if failed else 0)
+          PY

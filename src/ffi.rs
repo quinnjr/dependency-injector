@@ -28,7 +28,7 @@ use std::ffi::{CStr, CString, c_char};
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::ptr;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, RwLock};
+use std::sync::{Arc, PoisonError, RwLock};
 
 /// Opaque container handle for FFI
 pub struct DiContainer {
@@ -96,6 +96,12 @@ thread_local! {
     static LAST_ERROR: std::cell::RefCell<Option<String>> = const { std::cell::RefCell::new(None) };
 }
 
+/// Record `msg` as the thread-local last error.
+///
+/// Must stay allocation-only and non-reentrant (no logging, callbacks, or
+/// re-entry into FFI functions): the `Err` arm of [`ffi_guard`] calls this
+/// OUTSIDE `catch_unwind`, so a panic raised here would unwind straight
+/// across the FFI boundary.
 fn set_last_error(msg: impl Into<String>) {
     // Replace control characters (incl. newlines) with spaces: type names
     // are caller-supplied and error strings flow into host application
@@ -132,6 +138,24 @@ fn ffi_guard<T>(default: T, f: impl FnOnce() -> T) -> T {
             default
         }
     }
+}
+
+/// Test-only entry point that routes an explicit `&str` panic through
+/// [`ffi_guard`]: recovering from lock poisoning removed the last internal
+/// panic source, so this keeps the catch-unwind path directly exercised.
+#[cfg(test)]
+fn panicking_entry_str() -> DiErrorCode {
+    ffi_guard(DiErrorCode::InternalError, || panic!("test panic: boom"))
+}
+
+/// Companion to [`panicking_entry_str`] covering the `String` payload branch
+/// of [`ffi_guard`]'s downcast (format arguments produce a `String` payload).
+#[cfg(test)]
+fn panicking_entry_string() -> DiErrorCode {
+    ffi_guard(DiErrorCode::InternalError, || {
+        let detail = String::from("boom-string");
+        panic!("test panic: {detail}")
+    })
 }
 
 // ============================================================================
@@ -196,8 +220,17 @@ pub unsafe extern "C" fn di_container_scope(container: *mut DiContainer) -> *mut
         // SAFETY: Caller guarantees container is valid
         let parent = unsafe { &*container };
 
-        // Clone the services map for the child scope
-        let services = parent.services.read().unwrap().clone();
+        // Clone the services map for the child scope. Recover from lock
+        // poisoning here (and at every lock site below): poisoning cannot
+        // leave the map in a torn state because keys are plain Strings and no
+        // user code runs under the lock, so every critical section either
+        // completes or leaves the map untouched. Recovering prevents one
+        // caught panic from permanently bricking the container.
+        let services = parent
+            .services
+            .read()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone();
 
         let child = Box::new(DiContainer {
             services: RwLock::new(services),
@@ -280,7 +313,10 @@ pub unsafe extern "C" fn di_register_singleton(
 
         // Check and insert atomically under a single write lock so two threads
         // cannot both pass the existence check and silently overwrite each other.
-        let mut services = container.services.write().unwrap();
+        let mut services = container
+            .services
+            .write()
+            .unwrap_or_else(PoisonError::into_inner);
         match services.entry(type_name_str) {
             Entry::Occupied(entry) => {
                 set_last_error(format!("Service '{}' is already registered", entry.key()));
@@ -389,7 +425,11 @@ pub unsafe extern "C" fn di_remove(
         // SAFETY: Caller guarantees container is valid
         let container = unsafe { &*container };
 
-        let removed = container.services.write().unwrap().remove(type_name_str);
+        let removed = container
+            .services
+            .write()
+            .unwrap_or_else(PoisonError::into_inner)
+            .remove(type_name_str);
         if removed.is_some() {
             DiErrorCode::Ok
         } else {
@@ -419,7 +459,11 @@ pub unsafe extern "C" fn di_clear(container: *mut DiContainer) -> DiErrorCode {
 
         // SAFETY: Caller guarantees container is valid
         let container = unsafe { &*container };
-        container.services.write().unwrap().clear();
+        container
+            .services
+            .write()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clear();
         DiErrorCode::Ok
     })
 }
@@ -529,7 +573,10 @@ pub unsafe extern "C" fn di_resolve(
         let container = unsafe { &*container };
 
         // Look up the service
-        let services = container.services.read().unwrap();
+        let services = container
+            .services
+            .read()
+            .unwrap_or_else(PoisonError::into_inner);
         match services.get(&type_name_str) {
             Some(service_arc) => {
                 // Downcast to Vec<u8>
@@ -609,7 +656,10 @@ pub unsafe extern "C" fn di_resolve_json(
         let container = unsafe { &*container };
 
         // Look up the service
-        let services = container.services.read().unwrap();
+        let services = container
+            .services
+            .read()
+            .unwrap_or_else(PoisonError::into_inner);
         match services.get(&type_name_str) {
             Some(service_arc) => {
                 // Downcast to Vec<u8>
@@ -664,7 +714,10 @@ pub unsafe extern "C" fn di_contains(container: *mut DiContainer, type_name: *co
 
         // SAFETY: Caller guarantees container is valid
         let container = unsafe { &*container };
-        let services = container.services.read().unwrap();
+        let services = container
+            .services
+            .read()
+            .unwrap_or_else(PoisonError::into_inner);
 
         if services.contains_key(type_name_str) {
             1
@@ -838,7 +891,11 @@ pub unsafe extern "C" fn di_service_count(container: *const DiContainer) -> i64 
         }
         // SAFETY: Caller guarantees container is valid
         let container = unsafe { &*container };
-        container.services.read().unwrap().len() as i64
+        let services = container
+            .services
+            .read()
+            .unwrap_or_else(PoisonError::into_inner);
+        services.len() as i64
     })
 }
 
@@ -854,6 +911,40 @@ mod tests {
         // SAFETY: `container` came from `di_container_new` and is freed
         // exactly once, after `f` has finished using it.
         unsafe { di_container_free(container) };
+    }
+
+    /// Fetch the last error message as an owned `String`, asserting one is
+    /// present and freeing the FFI allocation per the ABI contract.
+    fn last_error_string() -> String {
+        let error = di_error_message();
+        assert!(!error.is_null(), "expected a last error message");
+        // SAFETY: `error` is a valid, non-null string allocated by
+        // `di_error_message`; it is freed exactly once below.
+        let message = unsafe { CStr::from_ptr(error) }
+            .to_str()
+            .unwrap()
+            .to_owned();
+        // SAFETY: `error` came from `di_error_message` and is freed once.
+        unsafe { di_string_free(error) };
+        message
+    }
+
+    #[test]
+    fn test_ffi_guard_catches_str_panic() {
+        di_error_clear();
+        assert_eq!(panicking_entry_str(), DiErrorCode::InternalError);
+        let msg = last_error_string();
+        assert!(msg.contains("internal panic"), "got: {msg}");
+        assert!(msg.contains("boom"), "got: {msg}");
+    }
+
+    #[test]
+    fn test_ffi_guard_catches_string_panic() {
+        di_error_clear();
+        assert_eq!(panicking_entry_string(), DiErrorCode::InternalError);
+        let msg = last_error_string();
+        assert!(msg.contains("internal panic"), "got: {msg}");
+        assert!(msg.contains("boom-string"), "got: {msg}");
     }
 
     #[test]
@@ -1010,6 +1101,76 @@ mod tests {
     }
 
     #[test]
+    fn test_concurrent_lock_vs_registration() {
+        // di_lock racing di_register_singleton: every registration attempt
+        // must resolve cleanly to Ok (beat the lock) or Locked (lost to it),
+        // and once the lock has landed it must refuse all later attempts.
+        struct SendPtr(*mut DiContainer);
+        // SAFETY: DiContainer's internals are RwLock/atomic-protected and all
+        // FFI functions are documented as thread-safe.
+        unsafe impl Send for SendPtr {}
+        unsafe impl Sync for SendPtr {}
+
+        const THREADS: usize = 8;
+
+        let container = std::sync::Arc::new(SendPtr(di_container_new()));
+        let barrier = std::sync::Arc::new(std::sync::Barrier::new(THREADS + 1));
+
+        let locker = {
+            let container = std::sync::Arc::clone(&container);
+            let barrier = std::sync::Arc::clone(&barrier);
+            std::thread::spawn(move || {
+                barrier.wait();
+                // SAFETY: the container stays alive until every thread below
+                // has been joined.
+                unsafe { di_lock(container.0) };
+            })
+        };
+
+        let handles: Vec<_> = (0..THREADS)
+            .map(|i| {
+                let container = std::sync::Arc::clone(&container);
+                let barrier = std::sync::Arc::clone(&barrier);
+                std::thread::spawn(move || {
+                    let name = CString::new(format!("Racer{i}")).unwrap();
+                    let data = b"race";
+                    barrier.wait();
+                    unsafe {
+                        di_register_singleton(container.0, name.as_ptr(), data.as_ptr(), data.len())
+                    }
+                })
+            })
+            .collect();
+
+        locker.join().unwrap();
+        for handle in handles {
+            let result = handle.join().unwrap();
+            assert!(
+                result == DiErrorCode::Ok || result == DiErrorCode::Locked,
+                "registration racing di_lock must be Ok or Locked, got {result:?}"
+            );
+        }
+
+        unsafe {
+            // The lock has landed: every subsequent registration - raced
+            // names and fresh ones alike - must now report Locked.
+            assert_eq!(di_is_locked(container.0), 1);
+            let data = b"race";
+            for i in 0..THREADS {
+                let name = CString::new(format!("Racer{i}")).unwrap();
+                let result =
+                    di_register_singleton(container.0, name.as_ptr(), data.as_ptr(), data.len());
+                assert_eq!(result, DiErrorCode::Locked);
+            }
+            let fresh = CString::new("LateRacer").unwrap();
+            let result =
+                di_register_singleton(container.0, fresh.as_ptr(), data.as_ptr(), data.len());
+            assert_eq!(result, DiErrorCode::Locked);
+            di_container_free(container.0);
+        }
+    }
+
+    #[test]
     fn test_json_register_and_resolve() {
         with_container(|container| unsafe {
             let type_name = CString::new("JsonService").unwrap();
@@ -1127,11 +1288,13 @@ mod tests {
             assert_eq!(di_remove(container, type_name.as_ptr()), DiErrorCode::Ok);
             assert_eq!(di_contains(container, type_name.as_ptr()), 0);
 
-            // Removing again must report NotFound
+            // Removing again must report NotFound, naming the service.
             assert_eq!(
                 di_remove(container, type_name.as_ptr()),
                 DiErrorCode::NotFound
             );
+            let msg = last_error_string();
+            assert!(msg.contains("Removable"), "got: {msg}");
         });
     }
 
@@ -1166,6 +1329,10 @@ mod tests {
                 di_register_singleton(container, blocked.as_ptr(), data.as_ptr(), data.len());
             assert_eq!(result, DiErrorCode::Locked);
 
+            // A Locked failure must surface a message mentioning the lock.
+            let msg = last_error_string();
+            assert!(msg.contains("locked"), "got: {msg}");
+
             let json = CString::new("{}").unwrap();
             let json_result =
                 di_register_singleton_json(container, blocked.as_ptr(), json.as_ptr());
@@ -1184,6 +1351,17 @@ mod tests {
             di_lock(container);
             assert_eq!(di_is_locked(container), 1);
         });
+    }
+
+    #[test]
+    fn test_null_container_sentinels() {
+        unsafe {
+            // -1 is the documented error sentinel for both query functions;
+            // it must stay distinct from the 0 ("false") result.
+            assert_eq!(di_is_locked(std::ptr::null_mut()), -1);
+            let name = CString::new("Anything").unwrap();
+            assert_eq!(di_contains(std::ptr::null_mut(), name.as_ptr()), -1);
+        }
     }
 
     #[test]

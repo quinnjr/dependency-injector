@@ -215,6 +215,10 @@ void di_lock(DiContainer* container);
  *
  * @param container The container to query.
  * @return 1 if the container is locked, 0 if it is not, -1 on error.
+ *         A negative return (-1) signals an internal error or invalid
+ *         argument - consult di_error_message() - and callers should not
+ *         collapse it into "false". Note: the current language bindings
+ *         treat -1 as false (known limitation).
  */
 int32_t di_is_locked(const DiContainer* container);
 
@@ -253,6 +257,10 @@ char* di_resolve_json(DiContainer* container, const char* type_name);
  * @param container The container to check.
  * @param type_name The service type name to check.
  * @return 1 if registered, 0 if not, -1 on error.
+ *         A negative return (-1) signals an internal error or invalid
+ *         argument - consult di_error_message() - and callers should not
+ *         collapse it into "false". Note: the current language bindings
+ *         treat -1 as false (known limitation).
  */
 int32_t di_contains(DiContainer* container, const char* type_name);
 

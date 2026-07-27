@@ -17,6 +17,9 @@ jobs:
     name: Fuzz Targets
     runs-on: ubuntu-latest
     timeout-minutes: 45
+    permissions:
+      contents: read
+      issues: write
     steps:
       - uses: actions/checkout@v6
 
@@ -24,16 +27,21 @@ jobs:
         uses: dtolnay/rust-toolchain@nightly
 
       - name: Install cargo-fuzz
-        uses: taiki-e/install-action@cargo-fuzz
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-fuzz
 
       - name: Cache fuzz build and corpus
         uses: actions/cache@v5
         with:
           path: |
+            ~/.cargo/registry
+            ~/.cargo/git
             fuzz/target
             fuzz/corpus
-          # Include the run id so the growing corpus is saved on every run;
-          # restore-keys picks up the most recent previous run.
+          # NOTE: this cache block is intentionally mirrored in ci.yml (fuzz job) so both workflows share the warmed corpus.
+          # The corpus grows every run, so the key includes the run id to force
+          # a fresh save; restore-keys fall back to the newest previous cache.
           key: ${{ runner.os }}-fuzz-${{ hashFiles('fuzz/Cargo.lock') }}-${{ github.run_id }}
           restore-keys: |
             ${{ runner.os }}-fuzz-${{ hashFiles('fuzz/Cargo.lock') }}-
@@ -54,3 +62,20 @@ jobs:
           name: fuzz-artifacts
           path: fuzz/artifacts
           if-no-files-found: ignore
+
+      - name: Report failure as issue
+        if: failure()
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          TITLE="Nightly fuzz failure"
+          BODY="Nightly fuzz run failed: ${RUN_URL}"
+          EXISTING=$(gh issue list --state open --search "\"$TITLE\" in:title" \
+            --json number,title --jq ".[] | select(.title == \"$TITLE\") | .number" | head -n 1)
+          if [ -n "$EXISTING" ]; then
+            gh issue comment "$EXISTING" --body "$BODY"
+          else
+            gh issue create --title "$TITLE" --body "$BODY"
+          fi

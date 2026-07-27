@@ -15,6 +15,7 @@ test:
 # Formatting check + strict clippy (mirrors the pre-push hook's pedantic set)
 lint:
     cargo fmt --all -- --check
+    @# KEEP IN SYNC with the .cargo-husky/hooks/pre-push clippy flag list
     cargo clippy --all-targets --all-features -- \
         -D warnings \
         -D clippy::all \

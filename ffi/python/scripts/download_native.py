@@ -12,6 +12,25 @@ Environment variables:
     DI_LIBRARY_PATH: Skip download and use this path instead
     DI_SKIP_DOWNLOAD: Skip download entirely
     DI_GITHUB_TOKEN: GitHub token for rate limiting
+    DI_REQUIRE_CHECKSUM: If set (non-empty), hard-fail when the release has
+        no SHA256SUMS asset instead of proceeding with a warning
+
+Failure policy (aligned with the Node installer, ffi/nodejs/scripts/install.js):
+
+- Network/download failure (release metadata fetch failure, missing platform
+  asset on the release, or the library download itself failing): warn and
+  exit 0. This is non-fatal because platform wheels normally bundle the
+  library, and users can build it from source.
+- Checksum mismatch, missing SHA256SUMS entry for the asset, or failure to
+  fetch an existing SHA256SUMS asset: hard fail (exit 1). The downloaded
+  file is deleted.
+- Release has no SHA256SUMS asset at all (pre-checksum release): warn and
+  proceed, unless DI_REQUIRE_CHECKSUM is set (non-empty), in which case
+  hard fail (exit 1).
+
+The library is downloaded to a temporary file next to the final path and only
+moved into place (atomic Path.replace) after the checksum verifies and the
+file mode is set, so the final path never holds an unverified or partial file.
 """
 
 from __future__ import annotations
@@ -137,13 +156,19 @@ def verify_checksum(assets: list[dict], tag: str, asset_name: str, lib_path: Pat
     """Verify the downloaded file against the release's SHA256SUMS asset.
 
     - Release has no SHA256SUMS asset (pre-checksum release): warn loudly
-      and return True (proceed).
+      and return True (proceed), unless DI_REQUIRE_CHECKSUM is set
+      (non-empty), in which case delete the file and return False.
     - SHA256SUMS exists but cannot be fetched, has no entry for the asset,
       or the hash mismatches: delete the downloaded file and return False.
     """
     sums_asset = next((a for a in assets if a["name"] == "SHA256SUMS"), None)
 
     if sums_asset is None:
+        if os.environ.get("DI_REQUIRE_CHECKSUM"):
+            lib_path.unlink(missing_ok=True)
+            print(f"❌ DI_REQUIRE_CHECKSUM is set but release {tag} has no SHA256SUMS asset.")
+            print("   Deleted the downloaded library since it could not be verified.")
+            return False
         print(
             f"⚠️  WARNING: release {tag} has no SHA256SUMS asset; "
             "skipping checksum verification (pre-checksum release)."
@@ -178,7 +203,11 @@ def verify_checksum(assets: list[dict], tag: str, asset_name: str, lib_path: Pat
 
 
 def download_file(url: str, dest: Path) -> None:
-    """Download a file from URL to destination."""
+    """Download a file from URL to destination.
+
+    The destination is written as-is; callers are responsible for verifying
+    it and moving it into its final location.
+    """
     print(f"Downloading from {url}...")
 
     headers = {"User-Agent": f"dependency-injector-python/{get_version()}"}
@@ -190,9 +219,16 @@ def download_file(url: str, dest: Path) -> None:
             while chunk := response.read(8192):
                 f.write(chunk)
 
-    # Make executable on Unix
-    if sys.platform != "win32":
-        dest.chmod(0o755)
+
+def print_build_instructions() -> None:
+    """Print the fallback options when no pre-built library is available."""
+    print()
+    print("You can:")
+    print("  1. Build locally: cargo rustc --release --features ffi --crate-type cdylib")
+    print("  2. Set DI_LIBRARY_PATH to point to an existing library")
+    print("  3. Install a platform-specific wheel instead of sdist")
+    print()
+    print("⚠️  Continuing without pre-built library")
 
 
 def main() -> int:
@@ -248,26 +284,38 @@ def main() -> int:
         )
 
     if not download_url:
-        print(f"❌ Could not find asset '{asset_name}' in release {tag}")
-        print()
-        print("You can:")
-        print("  1. Build locally: cargo rustc --release --features ffi --crate-type cdylib")
-        print("  2. Set DI_LIBRARY_PATH to point to an existing library")
-        print("  3. Install a platform-specific wheel instead of sdist")
-        return 1
+        # Missing release metadata or missing platform asset is a
+        # network/availability problem, not a security one: warn and
+        # continue (matches the Node installer).
+        print(f"⚠️  Could not find asset '{asset_name}' in release {tag}")
+        print_build_instructions()
+        return 0
+
+    # Download to a temp file next to the final path so the final path
+    # never holds an unverified or partial file.
+    tmp_path = lib_path.with_suffix(lib_path.suffix + ".download")
 
     try:
-        download_file(download_url, lib_path)
+        download_file(download_url, tmp_path)
     except Exception as e:
-        print(f"❌ Download failed: {e}")
-        print()
-        print("You can:")
-        print("  1. Build locally: cargo rustc --release --features ffi --crate-type cdylib")
-        print("  2. Set DI_LIBRARY_PATH to point to an existing library")
-        return 1
+        tmp_path.unlink(missing_ok=True)
+        print(f"⚠️  Download failed: {e}")
+        print_build_instructions()
+        return 0
 
-    # Verify against the release's SHA256SUMS (deletes the file on failure)
-    if not verify_checksum(assets, tag, asset_name, lib_path):
+    try:
+        # Verify FIRST (deletes the temp file on failure), then set the
+        # file mode, then atomically move into place.
+        if not verify_checksum(assets, tag, asset_name, tmp_path):
+            tmp_path.unlink(missing_ok=True)
+            return 1
+
+        if sys.platform != "win32":
+            tmp_path.chmod(0o755)
+        tmp_path.replace(lib_path)
+    except Exception as e:
+        tmp_path.unlink(missing_ok=True)
+        print(f"❌ Failed to install verified library: {e}")
         return 1
 
     print(f"✅ Downloaded to: {lib_path}")
