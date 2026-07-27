@@ -350,8 +350,10 @@ async function runBenchmarks() {
   console.log('============================\n');
 
   console.log('For comparison with Rust dependency-injector:');
-  console.log('- Rust singleton resolution: ~17-32 ns');
-  console.log('- Rust mixed workload (100 ops): ~2.2 µs');
+  console.log('- Rust singleton resolution: ~9.30 ns');
+  console.log('- Rust mixed workload (100 ops): ~1.60 µs');
+  console.log('  (measured on the machine described in BENCHMARK_COMPARISON.md,');
+  console.log('   not re-measured live here)');
   console.log('');
   console.log('Best Node.js times from this benchmark:');
   console.log(`- Singleton resolution: ${singletonResults[0].avgNs.toFixed(0)} ns (manual_di)`);

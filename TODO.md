@@ -17,20 +17,26 @@
 
 | Approach | Singleton | Concurrent (4 threads) |
 |----------|-----------|------------------------|
-| Manual DI | 8.4 ns | N/A |
-| **dependency-injector** | **9.4 ns** | 90 µs |
-| HashMap + RwLock | 21.5 ns | 93 µs |
-| DashMap (basic) | 22.2 ns | 89 µs |
+| Manual DI | 7.94 ns | N/A |
+| **dependency-injector** | **9.30 ns** | 90 µs |
+| HashMap + RwLock | 20.14 ns | 93 µs |
+| DashMap (basic) | 20.57 ns | 89 µs |
 
 ### vs Other Languages
 
+Measured 2026-07-27 on native Linux; see
+[BENCHMARK_COMPARISON.md](BENCHMARK_COMPARISON.md) for the full environment and caveats.
+
 | Language | Library | Singleton | Mixed Workload |
 |----------|---------|-----------|----------------|
-| **Rust** | **dependency-injector** | **17-32 ns** | **2.2 µs** |
-| Go | samber/do | 767 ns | 125 µs |
-| C# | MS.Extensions.DI | 208 ns | 31 µs |
-| Python | dependency-injector | 95 ns | 15.7 µs |
-| Node.js | inversify | 1,829 ns | 15 µs |
+| **Rust** | **dependency-injector** | **9.30 ns** | **1.60 µs** |
+| Go | samber/do | 199.9 ns | 29.98 µs |
+| C# † | MS.Extensions.DI | 208 ns | 31 µs |
+| Python | dependency-injector | 56.05 ns | 470.70 µs |
+| Node.js | inversify | 57.90 ns | 48.47 µs |
+
+† C# was not re-measured (no .NET SDK on this machine); those figures are from the earlier
+WSL2 run and are not directly comparable.
 
 ---
 
@@ -89,11 +95,3 @@ cd fuzz && cargo +nightly fuzz run fuzz_container -- -max_total_time=60
 *See [CHANGELOG.md](CHANGELOG.md) for version history*
 *See [BENCHMARK_COMPARISON.md](BENCHMARK_COMPARISON.md) for cross-language benchmarks*
 *See [RUST_DI_COMPARISON.md](RUST_DI_COMPARISON.md) for Rust ecosystem comparison*
-
-## Benchmarks
-
-- [ ] Re-run the cross-language mixed-workload benchmarks (samber/do,
-      inversify, dependency-injector/injector/punq) and update
-      BENCHMARK_COMPARISON.md — the 5% scope-creation branches were fixed
-      on 2026-07-21 to do real scope work, so the published numbers for
-      those libraries are stale.

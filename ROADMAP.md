@@ -133,16 +133,6 @@ until this lands.
   mismatches (`#[inject]` on a non-`Arc<T>` field; `#[inject(optional)]` on a
   non-`Option<Arc<T>>` field). `trybuild` would be dev-only on the derive
   crate, so it does not touch the published dependency graph.
-- Propagate the `-1` error sentinel through the four language bindings.
-  `di_contains()` returns `-1` for an invalid argument (null container, null
-  or non-UTF-8 type name), but Python, Node, Go, and C# all test `result == 1`
-  and so collapse `-1` into `false` — callers cannot distinguish "not
-  registered" from "bad argument" without consulting `di_error_message()`.
-  The header documents this as a known limitation; the fix is per-binding
-  (raise/throw, or return a tri-state). `di_is_locked()` has the same
-  sentinel and is not yet bound anywhere, so it should be wired up correctly
-  from the start — as should the rest of the new verbs (`di_remove`,
-  `di_clear`, `di_lock`), none of which any binding exposes today.
 - Decide what to do about the inert CI cache keys. `Cargo.lock` is gitignored
   repo-wide and no lockfile is tracked, so every
   `hashFiles('**/Cargo.lock')` component (`ci.yml` check/clippy/test/features/

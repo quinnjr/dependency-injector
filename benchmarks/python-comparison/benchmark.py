@@ -352,8 +352,10 @@ def main():
     print("============================\n")
 
     print("For comparison with Rust dependency-injector:")
-    print("- Rust singleton resolution: ~17-32 ns")
-    print("- Rust mixed workload (100 ops): ~2.2 µs")
+    print("- Rust singleton resolution: ~9.30 ns")
+    print("- Rust mixed workload (100 ops): ~1.60 µs")
+    print("  (measured on the machine described in BENCHMARK_COMPARISON.md,")
+    print("   not re-measured live here)")
     print()
     print("Best Python times from this benchmark:")
     print(f"- Singleton resolution: {singleton_results[0]['avg_ns']:.0f} ns (manual_di)")
