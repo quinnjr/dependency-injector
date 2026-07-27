@@ -171,8 +171,10 @@ func main() {
     requestScope, _ := container.Scope()
     defer requestScope.Free()
 
-    // Scope inherits parent services
-    fmt.Printf("Has Config: %v\n", requestScope.Contains("Config"))
+    // Scope inherits parent services (Contains returns (bool, error);
+    // a negative native sentinel is surfaced as an error, never as false)
+    hasConfig, _ := requestScope.Contains("Config")
+    fmt.Printf("Has Config: %v\n", hasConfig)
 }
 ```
 

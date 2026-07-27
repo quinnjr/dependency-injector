@@ -38,6 +38,8 @@ export enum ErrorCode {
   AlreadyRegistered = 3,
   InternalError = 4,
   SerializationError = 5,
+  /** Container is locked - registration is not allowed. */
+  Locked = 6,
 }
 
 /**
@@ -54,6 +56,8 @@ export class DIError extends Error {
   }
 
   static fromCode(code: ErrorCode, lastError?: string): DIError {
+    // Declared as an exhaustive `Record<ErrorCode, string>` so that adding a
+    // member to ErrorCode without a message is a compile error.
     const messages: Record<ErrorCode, string> = {
       [ErrorCode.Ok]: "Success",
       [ErrorCode.NotFound]: "Service not found",
@@ -61,8 +65,16 @@ export class DIError extends Error {
       [ErrorCode.AlreadyRegistered]: "Service already registered",
       [ErrorCode.InternalError]: "Internal error",
       [ErrorCode.SerializationError]: "Serialization error",
+      [ErrorCode.Locked]: "Container is locked - registration is not allowed",
     };
-    const baseMessage = messages[code] || `Unknown error code: ${code}`;
+    // `code` arrives from the native library as a raw number and may be a
+    // value this build's ErrorCode does not know about (a newer library adding
+    // an error code). Indexing the exhaustive record would tell TypeScript the
+    // result is always a string, so the lookup is widened to admit the
+    // undefined that actually occurs and the fallback message covers it.
+    const baseMessage =
+      (messages as Record<number, string | undefined>)[code] ??
+      `Unknown error code: ${code}`;
     const fullMessage = lastError ? `${baseMessage}: ${lastError}` : baseMessage;
     return new DIError(code, fullMessage);
   }
@@ -181,6 +193,11 @@ const di_register_singleton_json = lib.func("di_register_singleton_json", "int",
   "str",
 ]);
 
+const di_remove = lib.func("di_remove", "int", [ContainerPtr, "str"]);
+const di_clear = lib.func("di_clear", "int", [ContainerPtr]);
+const di_lock = lib.func("di_lock", "void", [ContainerPtr]);
+const di_is_locked = lib.func("di_is_locked", "int", [ContainerPtr]);
+
 const di_resolve_json = lib.func("di_resolve_json", RawCharPtr, [ContainerPtr, "str"]);
 const di_contains = lib.func("di_contains", "int", [ContainerPtr, "str"]);
 const di_service_count = lib.func("di_service_count", "int64", [ContainerPtr]);
@@ -229,6 +246,40 @@ function getLastError(): string | null {
  */
 function clearError(): void {
   di_error_clear();
+}
+
+/**
+ * Decode a tri-state `int32_t` sentinel returned by the native library.
+ *
+ * `di_contains()` and `di_is_locked()` return 1 for true, 0 for false and a
+ * negative value for "an error occurred - consult di_error_message()". Per
+ * ffi/dependency_injector.h callers must NOT collapse the negative case into
+ * `false`: doing so reports an internal error or invalid argument as a
+ * confident "no". It is surfaced as a thrown DIError instead.
+ *
+ * Callers must call `clearError()` before the native call so that the message
+ * read here belongs to this operation.
+ *
+ * @param result - Raw value returned by the native function.
+ * @param operation - Description of the call, used when no native message is set.
+ * @returns `true` for 1, `false` for 0.
+ * @throws {DIError} If `result` is negative.
+ */
+function decodeTriState(result: number, operation: string): boolean {
+  if (result === 1) {
+    return true;
+  }
+  if (result === 0) {
+    return false;
+  }
+  const error = getLastError();
+  // The container pointer is non-null (ensureNotFreed) and koffi always hands
+  // the native side a valid NUL-terminated string, so the remaining cause is a
+  // panic caught at the FFI boundary: an internal error.
+  throw DIError.fromCode(
+    ErrorCode.InternalError,
+    error || `${operation} failed (native returned ${result})`
+  );
 }
 
 /**
@@ -309,6 +360,9 @@ export class Container {
    * Services registered in the child scope are not visible to the parent.
    * The child scope can resolve services from the parent.
    *
+   * Inheritance is a snapshot taken at creation time, and the child starts
+   * unlocked regardless of this container's lock state.
+   *
    * @returns A new scoped container.
    *
    * @example
@@ -347,7 +401,10 @@ export class Container {
    *
    * @param typeName - A unique identifier for this service type.
    * @param value - The service value (must be JSON-serializable).
-   * @throws {DIError} If the service is already registered or serialization fails.
+   * @throws {DIError} If the service is already registered
+   *   (`ErrorCode.AlreadyRegistered`), the container has been locked with
+   *   {@link Container.lock} (`ErrorCode.Locked`), or serialization fails
+   *   (`ErrorCode.SerializationError`).
    *
    * @example
    * ```typescript
@@ -430,23 +487,178 @@ export class Container {
   /**
    * Check if a service is registered.
    *
+   * A native failure is reported as a thrown error rather than `false`: the
+   * C ABI returns -1 for "an error occurred" and collapsing that into "not
+   * registered" would hide it (see ffi/dependency_injector.h).
+   *
    * @param typeName - The service type name to check.
-   * @returns `true` if the service is registered, `false` otherwise.
+   * @returns `true` if the service is registered, `false` if it is not.
+   * @throws {DIError} If the native call reports an error (-1), or if the
+   *   container has been freed.
+   *
+   * @example
+   * ```typescript
+   * container.register('Config', { debug: true });
+   * container.contains('Config');  // true
+   * container.contains('Missing'); // false
+   * ```
    */
   contains(typeName: string): boolean {
     this.ensureNotFreed();
-    const result = di_contains(this.ptr!, typeName);
-    return result === 1;
+    clearError();
+    return decodeTriState(
+      di_contains(this.ptr!, typeName),
+      `contains('${typeName}')`
+    );
+  }
+
+  /**
+   * Remove a registered service by type name.
+   *
+   * Removal is permitted on a locked container: locking blocks new
+   * registrations only.
+   *
+   * @param typeName - The service type name to remove.
+   * @returns `true` if the service was removed, `false` if no service with
+   *   that name was registered.
+   * @throws {DIError} If the native call fails for any reason other than the
+   *   service being absent.
+   *
+   * @example
+   * ```typescript
+   * container.register('Cache', { ttl: 60 });
+   * container.remove('Cache');   // true
+   * container.contains('Cache'); // false
+   * container.remove('Cache');   // false (already gone)
+   * ```
+   */
+  remove(typeName: string): boolean {
+    this.ensureNotFreed();
+    clearError();
+
+    const code = di_remove(this.ptr!, typeName);
+    if (code === ErrorCode.Ok) {
+      return true;
+    }
+    // NotFound is an expected outcome, not a failure: the native side sets an
+    // error message for it, which the next clearError() discards.
+    if (code === ErrorCode.NotFound) {
+      return false;
+    }
+    const error = getLastError();
+    throw DIError.fromCode(code, error || undefined);
+  }
+
+  /**
+   * Remove all registered services from this container.
+   *
+   * Clearing is permitted on a locked container: locking blocks new
+   * registrations only. Child scopes already created keep their own snapshot
+   * of the services and are unaffected.
+   *
+   * @throws {DIError} If the native call fails.
+   *
+   * @example
+   * ```typescript
+   * container.register('A', { id: 1 });
+   * container.register('B', { id: 2 });
+   * container.clear();
+   * console.log(container.serviceCount); // 0
+   * ```
+   */
+  clear(): void {
+    this.ensureNotFreed();
+    clearError();
+
+    const code = di_clear(this.ptr!);
+    if (code !== ErrorCode.Ok) {
+      const error = getLastError();
+      throw DIError.fromCode(code, error || undefined);
+    }
+  }
+
+  /**
+   * Lock this container to prevent further registrations.
+   *
+   * Locking blocks registration only: {@link Container.remove} and
+   * {@link Container.clear} remain permitted, and resolution is unaffected.
+   * After locking, {@link Container.register} throws a {@link DIError} with
+   * `code === ErrorCode.Locked`. There is no unlock. Child scopes created with
+   * {@link Container.scope} start unlocked regardless of this container's
+   * lock state.
+   *
+   * @throws {DIError} If the native call fails.
+   *
+   * @example
+   * ```typescript
+   * container.register('Config', { env: 'production' });
+   * container.lock();
+   *
+   * container.isLocked(); // true
+   * container.register('Late', {}); // throws DIError (ErrorCode.Locked)
+   * container.remove('Config');     // still allowed -> true
+   * ```
+   */
+  lock(): void {
+    this.ensureNotFreed();
+    clearError();
+
+    di_lock(this.ptr!);
+    // di_lock() returns void. Its only documented failure is a null container,
+    // which ensureNotFreed() has already excluded, so a message here means a
+    // panic was caught at the FFI boundary - surface it instead of silently
+    // leaving the container unlocked.
+    const error = getLastError();
+    if (error) {
+      throw new DIError(ErrorCode.InternalError, `Failed to lock container: ${error}`);
+    }
+  }
+
+  /**
+   * Check whether this container is locked.
+   *
+   * A native failure is reported as a thrown error rather than `false`: the
+   * C ABI returns -1 for "an error occurred" and collapsing that into
+   * "not locked" would hide it (see ffi/dependency_injector.h).
+   *
+   * @returns `true` if the container is locked, `false` if it is not.
+   * @throws {DIError} If the native call reports an error (-1), or if the
+   *   container has been freed.
+   *
+   * @example
+   * ```typescript
+   * container.isLocked(); // false
+   * container.lock();
+   * container.isLocked(); // true
+   * ```
+   */
+  isLocked(): boolean {
+    this.ensureNotFreed();
+    clearError();
+    return decodeTriState(di_is_locked(this.ptr!), "isLocked()");
   }
 
   /**
    * Get the number of registered services.
    *
+   * The native library returns -1 to signal an error (a panic caught at the
+   * FFI boundary); that sentinel is thrown rather than returned as a count,
+   * so this getter never reports a negative number of services.
+   *
    * @returns The number of services in the container.
+   * @throws {DIError} If the native call fails.
    */
   get serviceCount(): number {
     this.ensureNotFreed();
-    return Number(di_service_count(this.ptr!));
+    clearError();
+    const count = Number(di_service_count(this.ptr!));
+    if (count < 0) {
+      throw DIError.fromCode(
+        ErrorCode.InternalError,
+        getLastError() || `serviceCount failed (native returned ${count})`
+      );
+    }
+    return count;
   }
 
   /**

@@ -8,6 +8,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- **FFI verbs exposed in every language binding**: `remove`, `clear`, `lock`,
+  and `is_locked`/`isLocked`/`IsLocked` are now bound in Python, Node.js, Go,
+  and C#, together with the `LOCKED` (6) error code. Locking blocks
+  registration only — removal, clearing, and resolution stay permitted —
+  matching the core container, and child scopes start unlocked.
+- **Correct `-1` sentinel handling across all bindings**: `contains` and
+  `service_count` previously folded the native error sentinel into `false` and
+  a count of `-1`. All four bindings now raise/throw instead, so an internal
+  error can no longer masquerade as "service not registered" or a negative
+  count. The C header's guidance was updated to match (it previously described
+  the collapse as a known limitation).
 - **Real async support**: `Container::lazy_async`, `get_async`, and
   `try_get_async` (feature `async`) — async-initialized singletons backed by
   `tokio::sync::OnceCell`. Successful initialization happens exactly once
@@ -50,6 +61,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   package ecosystems.
 
 ### Changed
+- **BREAKING (Go binding)**: `Contains` and `ServiceCount` now return
+  `(bool, error)` and `(int64, error)` respectively. The native library
+  returns `-1` from `di_contains`/`di_service_count` to signal an error, and
+  the old single-value signatures collapsed that sentinel into `false` / a
+  count of `-1`, so an internal failure was indistinguishable from "not
+  registered" or reported as a negative service count. Callers must destructure
+  the second value; `ffi/go/example/main.go` shows the updated form.
 - **BREAKING (derive input)**: a field carrying more than one
   `#[inject]`/`#[dep]` marker is now a compile error spanning the duplicate
   attribute. Previously the first marker won and every later one was silently

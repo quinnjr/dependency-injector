@@ -140,6 +140,155 @@ describe("Container", () => {
     });
   });
 
+  describe("remove", () => {
+    it("should round-trip register, remove, and re-remove", () => {
+      container.register("Cache", { ttl: 60 });
+      expect(container.contains("Cache")).toBe(true);
+
+      expect(container.remove("Cache")).toBe(true);
+      expect(container.contains("Cache")).toBe(false);
+      expect(container.serviceCount).toBe(0);
+
+      // Removing again reports "was not there", it does not throw.
+      expect(container.remove("Cache")).toBe(false);
+    });
+
+    it("should return false for non-existent service", () => {
+      expect(container.remove("NeverRegistered")).toBe(false);
+    });
+
+    it("should leave other services untouched", () => {
+      container.register("Keep", { id: 1 });
+      container.register("Drop", { id: 2 });
+
+      expect(container.remove("Drop")).toBe(true);
+      expect(container.contains("Keep")).toBe(true);
+      expect(container.serviceCount).toBe(1);
+    });
+
+    it("should allow re-registering a removed service", () => {
+      container.register("Config", { first: true });
+      expect(container.remove("Config")).toBe(true);
+      container.register("Config", { second: true });
+      expect(container.resolve<{ second: boolean }>("Config").second).toBe(true);
+    });
+
+    it("should throw when using freed container", () => {
+      const c = new Container();
+      c.free();
+      expect(() => c.remove("Anything")).toThrow(DIError);
+    });
+  });
+
+  describe("clear", () => {
+    it("should remove all services", () => {
+      container.register("Service1", { id: 1 });
+      container.register("Service2", { id: 2 });
+      expect(container.serviceCount).toBe(2);
+
+      container.clear();
+
+      expect(container.serviceCount).toBe(0);
+      expect(container.contains("Service1")).toBe(false);
+      expect(container.contains("Service2")).toBe(false);
+    });
+
+    it("should be a no-op on an empty container", () => {
+      container.clear();
+      expect(container.serviceCount).toBe(0);
+    });
+
+    it("should allow registering again after clearing", () => {
+      container.register("Config", { first: true });
+      container.clear();
+      container.register("Config", { second: true });
+      expect(container.serviceCount).toBe(1);
+    });
+
+    it("should throw when using freed container", () => {
+      const c = new Container();
+      c.free();
+      expect(() => c.clear()).toThrow(DIError);
+    });
+  });
+
+  describe("lock", () => {
+    it("should report the lock state", () => {
+      expect(container.isLocked()).toBe(false);
+      container.lock();
+      expect(container.isLocked()).toBe(true);
+    });
+
+    it("should be idempotent", () => {
+      container.lock();
+      container.lock();
+      expect(container.isLocked()).toBe(true);
+    });
+
+    it("should reject registration with ErrorCode.Locked", () => {
+      container.lock();
+      try {
+        container.register("TooLate", { id: 1 });
+        expect.fail("Should have thrown");
+      } catch (error) {
+        expect(error).toBeInstanceOf(DIError);
+        expect((error as DIError).code).toBe(ErrorCode.Locked);
+        expect((error as DIError).message).toMatch(/locked/i);
+      }
+    });
+
+    it("should still allow resolution after locking", () => {
+      container.register("Config", { port: 8080 });
+      container.lock();
+      expect(container.resolve<{ port: number }>("Config").port).toBe(8080);
+      expect(container.contains("Config")).toBe(true);
+    });
+
+    it("should still allow remove after locking", () => {
+      container.register("Config", { port: 8080 });
+      container.lock();
+      expect(container.remove("Config")).toBe(true);
+      expect(container.contains("Config")).toBe(false);
+      expect(container.isLocked()).toBe(true);
+    });
+
+    it("should still allow clear after locking", () => {
+      container.register("Service1", { id: 1 });
+      container.register("Service2", { id: 2 });
+      container.lock();
+      container.clear();
+      expect(container.serviceCount).toBe(0);
+      expect(container.isLocked()).toBe(true);
+    });
+
+    it("should give child scopes an unlocked container", () => {
+      container.register("Parent", { from: "parent" });
+      container.lock();
+
+      const child = container.scope();
+      try {
+        expect(child.isLocked()).toBe(false);
+        // The snapshot is inherited, but the child accepts registrations.
+        expect(child.contains("Parent")).toBe(true);
+        child.register("Child", { from: "child" });
+        expect(child.contains("Child")).toBe(true);
+        // Locking the child does not unlock or re-lock the parent.
+        child.lock();
+        expect(child.isLocked()).toBe(true);
+        expect(container.isLocked()).toBe(true);
+      } finally {
+        child.free();
+      }
+    });
+
+    it("should throw when using freed container", () => {
+      const c = new Container();
+      c.free();
+      expect(() => c.lock()).toThrow(DIError);
+      expect(() => c.isLocked()).toThrow(DIError);
+    });
+  });
+
   describe("scope", () => {
     it("should create a child scope", () => {
       const child = container.scope();
@@ -229,6 +378,31 @@ describe("Container", () => {
         expect(error).toBeInstanceOf(DIError);
         expect((error as DIError).code).toBe(ErrorCode.AlreadyRegistered);
       }
+    });
+
+    it("should have a message for every known error code", () => {
+      const codes = [
+        ErrorCode.Ok,
+        ErrorCode.NotFound,
+        ErrorCode.InvalidArgument,
+        ErrorCode.AlreadyRegistered,
+        ErrorCode.InternalError,
+        ErrorCode.SerializationError,
+        ErrorCode.Locked,
+      ];
+      for (const code of codes) {
+        const error = DIError.fromCode(code);
+        expect(error.code).toBe(code);
+        expect(error.message).not.toMatch(/^Unknown error code/);
+      }
+      expect(DIError.fromCode(ErrorCode.Locked).message).toMatch(/locked/i);
+    });
+
+    it("should fall back for an unknown error code", () => {
+      // A newer native library could return a code this build predates.
+      const error = DIError.fromCode(99 as ErrorCode);
+      expect(error.code).toBe(99);
+      expect(error.message).toBe("Unknown error code: 99");
     });
   });
 });

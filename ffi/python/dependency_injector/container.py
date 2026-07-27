@@ -20,13 +20,16 @@ from ctypes import (
 )
 from enum import IntEnum
 from pathlib import Path
-from typing import Any, TypeVar
+from typing import Any, NoReturn, TypeVar
 
 T = TypeVar("T")
 
 
 class ErrorCode(IntEnum):
-    """Error codes returned by the native library."""
+    """Error codes returned by the native library.
+
+    Mirrors ``DiErrorCode`` in ``ffi/dependency_injector.h``.
+    """
 
     OK = 0
     NOT_FOUND = 1
@@ -34,6 +37,28 @@ class ErrorCode(IntEnum):
     ALREADY_REGISTERED = 3
     INTERNAL_ERROR = 4
     SERIALIZATION_ERROR = 5
+    LOCKED = 6
+
+
+def _to_error_code(code: int) -> ErrorCode:
+    """Convert a raw native error code into an :class:`ErrorCode`.
+
+    ``ErrorCode(code)`` raises ``ValueError`` for an integer that is not a
+    member, so a code added to the native ABI ahead of this binding would
+    crash the error path instead of reporting the underlying failure.
+    Unrecognized codes fall back to ``ErrorCode.INTERNAL_ERROR``.
+
+    Args:
+        code: The raw integer returned by the native library.
+
+    Returns:
+        The matching ``ErrorCode``, or ``ErrorCode.INTERNAL_ERROR`` if the
+        code is not recognized by this binding.
+    """
+    try:
+        return ErrorCode(code)
+    except ValueError:
+        return ErrorCode.INTERNAL_ERROR
 
 
 class DIError(Exception):
@@ -52,6 +77,7 @@ class DIError(Exception):
             ErrorCode.ALREADY_REGISTERED: "Service already registered",
             ErrorCode.INTERNAL_ERROR: "Internal error",
             ErrorCode.SERIALIZATION_ERROR: "Serialization error",
+            ErrorCode.LOCKED: "Container is locked",
         }
         base = code_messages.get(self.code, f"Unknown error code: {self.code}")
         if self.message:
@@ -158,6 +184,19 @@ _lib.di_resolve_json.restype = c_void_p
 _lib.di_contains.argtypes = [c_void_p, c_char_p]
 _lib.di_contains.restype = c_int32
 
+_lib.di_remove.argtypes = [c_void_p, c_char_p]
+_lib.di_remove.restype = c_int
+
+_lib.di_clear.argtypes = [c_void_p]
+_lib.di_clear.restype = c_int
+
+# di_lock returns void; failures are reported through di_error_message().
+_lib.di_lock.argtypes = [c_void_p]
+_lib.di_lock.restype = None
+
+_lib.di_is_locked.argtypes = [c_void_p]
+_lib.di_is_locked.restype = c_int32
+
 _lib.di_service_count.argtypes = [c_void_p]
 _lib.di_service_count.restype = c_int64
 
@@ -198,6 +237,30 @@ def _get_last_error() -> str | None:
 def _clear_error() -> None:
     """Clear the last error message."""
     _lib.di_error_clear()
+
+
+def _raise_native_error(code: int, default_message: str = "") -> NoReturn:
+    """Raise a :class:`DIError` for a non-OK native return code.
+
+    Consumes the thread-local message set by the native library and pairs it
+    with the converted error code. A code this binding does not recognize is
+    reported as ``ErrorCode.INTERNAL_ERROR`` with the raw value preserved in
+    the message so a newer native ABI stays diagnosable.
+
+    Args:
+        code: The raw error code returned by the native library.
+        default_message: Message to use when the library set no error text.
+
+    Raises:
+        DIError: Always.
+    """
+    error = _get_last_error()
+    resolved = _to_error_code(code)
+    message = error or default_message
+    if resolved == ErrorCode.INTERNAL_ERROR and code != ErrorCode.INTERNAL_ERROR:
+        detail = f"unrecognized native error code {code}"
+        message = f"{detail}: {message}" if message else detail
+    raise DIError(resolved, message)
 
 
 class Container:
@@ -328,7 +391,8 @@ class Container:
             value: The service value (must be JSON-serializable).
 
         Raises:
-            DIError: If the service is already registered or serialization fails.
+            DIError: If the service is already registered, the container has
+                been locked (``ErrorCode.LOCKED``), or serialization fails.
 
         Example:
             >>> container.register("Config", {"debug": True, "port": 8080})
@@ -349,8 +413,7 @@ class Container:
 
         code = _lib.di_register_singleton_json(self._ptr, type_name_bytes, json_bytes)
         if code != ErrorCode.OK:
-            error = _get_last_error()
-            raise DIError(ErrorCode(code), error or "")
+            _raise_native_error(code, f"Failed to register '{type_name}'")
 
     def register_bytes(self, type_name: str, data: bytes) -> None:
         """
@@ -361,6 +424,13 @@ class Container:
         Args:
             type_name: A unique identifier for this service type.
             data: The raw byte data.
+
+        Raises:
+            DIError: If the service is already registered or the container has
+                been locked (``ErrorCode.LOCKED``).
+
+        Example:
+            >>> container.register_bytes("Blob", b"\\x00\\x01raw")
         """
         self._ensure_not_freed()
         _clear_error()
@@ -372,8 +442,7 @@ class Container:
             self._ptr, type_name_bytes, data_array, len(data)
         )
         if code != ErrorCode.OK:
-            error = _get_last_error()
-            raise DIError(ErrorCode(code), error or "")
+            _raise_native_error(code, f"Failed to register '{type_name}'")
 
     def resolve(self, type_name: str) -> Any:
         """
@@ -444,15 +513,178 @@ class Container:
         """
         Check if a service is registered.
 
+        The native ``di_contains`` returns 1 for registered, 0 for not
+        registered, and a negative value (-1) on error. Per the FFI contract
+        in ``ffi/dependency_injector.h``, the negative case must not be
+        collapsed into ``False`` - it signals an invalid argument or a caught
+        internal panic, not an absent service - so it is raised instead.
+
         Args:
             type_name: The service type name to check.
 
         Returns:
-            True if the service is registered, False otherwise.
+            True if the service is registered, False if it is not.
+
+        Raises:
+            DIError: If the container has been freed, or the native library
+                reported an error (negative return).
+
+        Example:
+            >>> container.register("Config", {"debug": True})
+            >>> container.contains("Config")  # True
+            >>> container.contains("Missing")  # False
         """
         self._ensure_not_freed()
+        _clear_error()
+
         type_name_bytes = type_name.encode("utf-8")
         result = _lib.di_contains(self._ptr, type_name_bytes)
+        if result < 0:
+            self._raise_sentinel_error(
+                f"di_contains failed for '{type_name}'",
+            )
+        return result == 1
+
+    @staticmethod
+    def _raise_sentinel_error(default_message: str) -> NoReturn:
+        """Raise a DIError for a negative int sentinel (-1) return.
+
+        The native library reports a message only for the caught-panic path;
+        the invalid-argument paths return -1 with no message. Distinguish the
+        two so the raised code is accurate.
+
+        Args:
+            default_message: Context used when the library set no error text.
+
+        Raises:
+            DIError: Always.
+        """
+        error = _get_last_error()
+        if error:
+            raise DIError(ErrorCode.INTERNAL_ERROR, error)
+        raise DIError(ErrorCode.INVALID_ARGUMENT, default_message)
+
+    def remove(self, type_name: str) -> bool:
+        """
+        Remove a registered service by type name.
+
+        Removal is permitted on a locked container: locking blocks new
+        registrations only, matching the core container's semantics.
+
+        Args:
+            type_name: The service type name to remove.
+
+        Returns:
+            True if the service was removed, False if no service with that
+            name was registered.
+
+        Raises:
+            DIError: If the container has been freed, or the native library
+                reported an error other than "not found".
+
+        Example:
+            >>> container.register("Config", {"debug": True})
+            >>> container.remove("Config")  # True
+            >>> container.remove("Config")  # False (already gone)
+        """
+        self._ensure_not_freed()
+        _clear_error()
+
+        type_name_bytes = type_name.encode("utf-8")
+        code = _lib.di_remove(self._ptr, type_name_bytes)
+        if code == ErrorCode.OK:
+            return True
+        if code == ErrorCode.NOT_FOUND:
+            # The library sets an error message for NotFound; drain it so it
+            # cannot be misattributed to a later call.
+            _clear_error()
+            return False
+        _raise_native_error(code, f"Failed to remove '{type_name}'")
+
+    def clear(self) -> None:
+        """
+        Remove all registered services from this container.
+
+        Clearing is permitted on a locked container: locking blocks new
+        registrations only, matching the core container's semantics.
+
+        Raises:
+            DIError: If the container has been freed or the native library
+                reported an error.
+
+        Example:
+            >>> container.register("A", {"id": 1})
+            >>> container.register("B", {"id": 2})
+            >>> container.clear()
+            >>> container.service_count  # 0
+        """
+        self._ensure_not_freed()
+        _clear_error()
+
+        code = _lib.di_clear(self._ptr)
+        if code != ErrorCode.OK:
+            _raise_native_error(code, "Failed to clear container")
+
+    def lock(self) -> None:
+        """
+        Lock this container to prevent further registrations.
+
+        Locking blocks registration only: `remove()` and `clear()` remain
+        permitted on a locked container, matching the core container's
+        semantics. There is no unlock. Child scopes created with `scope()`
+        start unlocked regardless of this container's lock state.
+
+        After locking, `register()` and `register_bytes()` raise a `DIError`
+        carrying `ErrorCode.LOCKED`.
+
+        Raises:
+            DIError: If the container has been freed or the native library
+                reported an error.
+
+        Example:
+            >>> container.register("Config", {"debug": True})
+            >>> container.lock()
+            >>> container.is_locked()  # True
+            >>> container.register("Late", {})  # raises DIError (LOCKED)
+            >>> container.remove("Config")  # True - removal still allowed
+        """
+        self._ensure_not_freed()
+        _clear_error()
+
+        # di_lock returns void; a failure is reported only via the
+        # thread-local error message.
+        _lib.di_lock(self._ptr)
+        error = _get_last_error()
+        if error:
+            raise DIError(ErrorCode.INVALID_ARGUMENT, error)
+
+    def is_locked(self) -> bool:
+        """
+        Check whether this container is locked.
+
+        The native ``di_is_locked`` returns 1 for locked, 0 for unlocked, and
+        a negative value (-1) on error. As with `contains()`, the negative
+        case is an error and must not be collapsed into ``False``, so it is
+        raised.
+
+        Returns:
+            True if the container is locked, False if it is not.
+
+        Raises:
+            DIError: If the container has been freed, or the native library
+                reported an error (negative return).
+
+        Example:
+            >>> container.is_locked()  # False
+            >>> container.lock()
+            >>> container.is_locked()  # True
+        """
+        self._ensure_not_freed()
+        _clear_error()
+
+        result = _lib.di_is_locked(self._ptr)
+        if result < 0:
+            self._raise_sentinel_error("di_is_locked failed")
         return result == 1
 
     @property
@@ -460,11 +692,24 @@ class Container:
         """
         Get the number of registered services.
 
+        The native library returns -1 to signal an error (a panic caught at
+        the FFI boundary); that sentinel is raised rather than returned as a
+        count, so this never reports a negative number of services.
+
         Returns:
             The number of services in the container.
+
+        Raises:
+            DIError: If the native call fails.
         """
         self._ensure_not_freed()
-        return int(_lib.di_service_count(self._ptr))
+        _clear_error()
+        count = int(_lib.di_service_count(self._ptr))
+        if count < 0:
+            self._raise_sentinel_error(
+                f"di_service_count failed (native returned {count})",
+            )
+        return count
 
     @staticmethod
     def version() -> str:

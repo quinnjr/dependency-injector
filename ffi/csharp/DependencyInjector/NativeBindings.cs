@@ -20,6 +20,8 @@ namespace DependencyInjector.Native
         InternalError = 4,
         /// <summary>Serialization/deserialization error.</summary>
         SerializationError = 5,
+        /// <summary>Container is locked - registration is not allowed.</summary>
+        Locked = 6,
     }
 
     /// <summary>
@@ -85,6 +87,59 @@ namespace DependencyInjector.Native
             [MarshalAs(UnmanagedType.LPUTF8Str)] string jsonData);
 
         // ============================================================================
+        // Service Removal and Locking
+        // ============================================================================
+
+        /// <summary>
+        /// Remove a registered service by type name.
+        /// </summary>
+        /// <remarks>
+        /// Returns <see cref="DiErrorCode.Ok"/> if the service was removed,
+        /// <see cref="DiErrorCode.NotFound"/> if no service with that name is
+        /// registered, or <see cref="DiErrorCode.InvalidArgument"/> for a null
+        /// container or an invalid type name. Removal is permitted on a locked
+        /// container.
+        /// </remarks>
+        [DllImport(LibraryName, CallingConvention = CallingConvention.Cdecl)]
+        public static extern DiErrorCode di_remove(
+            IntPtr container,
+            [MarshalAs(UnmanagedType.LPUTF8Str)] string typeName);
+
+        /// <summary>
+        /// Remove all registered services from a container.
+        /// </summary>
+        /// <remarks>
+        /// Returns <see cref="DiErrorCode.Ok"/> on success, or
+        /// <see cref="DiErrorCode.InvalidArgument"/> if the container is null.
+        /// Clearing is permitted on a locked container.
+        /// </remarks>
+        [DllImport(LibraryName, CallingConvention = CallingConvention.Cdecl)]
+        public static extern DiErrorCode di_clear(IntPtr container);
+
+        /// <summary>
+        /// Lock a container to prevent further registrations.
+        /// </summary>
+        /// <remarks>
+        /// Once locked, the registration entry points return
+        /// <see cref="DiErrorCode.Locked"/>. Removal and clearing remain
+        /// permitted. There is no unlock.
+        /// </remarks>
+        [DllImport(LibraryName, CallingConvention = CallingConvention.Cdecl)]
+        public static extern void di_lock(IntPtr container);
+
+        /// <summary>
+        /// Check whether a container is locked.
+        /// </summary>
+        /// <remarks>
+        /// Returns 1 if locked, 0 if not, and -1 on error. A negative return
+        /// signals an internal error or invalid argument (see
+        /// <see cref="di_error_message"/>) and must not be collapsed into
+        /// "false".
+        /// </remarks>
+        [DllImport(LibraryName, CallingConvention = CallingConvention.Cdecl)]
+        public static extern int di_is_locked(IntPtr container);
+
+        // ============================================================================
         // Service Resolution
         // ============================================================================
 
@@ -107,6 +162,12 @@ namespace DependencyInjector.Native
         /// <summary>
         /// Check if a service is registered.
         /// </summary>
+        /// <remarks>
+        /// Returns 1 if registered, 0 if not, and -1 on error. A negative
+        /// return signals an internal error or invalid argument (see
+        /// <see cref="di_error_message"/>) and must not be collapsed into
+        /// "false".
+        /// </remarks>
         [DllImport(LibraryName, CallingConvention = CallingConvention.Cdecl)]
         public static extern int di_contains(
             IntPtr container,

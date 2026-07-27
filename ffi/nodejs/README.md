@@ -126,6 +126,46 @@ requestScope.free();
 root.free();
 ```
 
+## Removal and Locking
+
+Services can be removed individually or all at once, and a container can be
+sealed once wiring is complete:
+
+```typescript
+const container = new Container();
+container.register('Config', { env: 'production' });
+container.register('Cache', { ttl: 60 });
+
+// Remove one service - false means "there was nothing to remove"
+container.remove('Cache');   // true
+container.remove('Cache');   // false
+
+// Seal the container: no further registrations
+container.lock();
+container.isLocked();        // true
+
+try {
+  container.register('Late', {});
+} catch (error) {
+  if (error instanceof DIError) {
+    console.log(error.code === ErrorCode.Locked); // true
+  }
+}
+
+// Locking blocks registration only
+container.resolve('Config'); // still works
+container.remove('Config');  // still works
+container.clear();           // still works
+
+// Child scopes start unlocked, even from a locked parent
+const child = container.scope();
+child.isLocked();            // false
+child.register('Request', { id: 'req-1' }); // allowed
+
+child.free();
+container.free();
+```
+
 ## API Reference
 
 ### `Container`
@@ -140,10 +180,34 @@ Register a singleton service. The value is JSON-serialized.
 Resolve a service. The value is JSON-deserialized.
 
 #### `container.contains(typeName: string): boolean`
-Check if a service is registered.
+Check if a service is registered. Returns `true`/`false`; a native failure
+throws rather than reporting `false` (see
+[Error signalling](#error-signalling)).
+
+#### `container.remove(typeName: string): boolean`
+Remove a registered service. Returns `true` if it was removed, `false` if no
+service with that name was registered. Any other native failure throws.
+Permitted on a locked container.
+
+#### `container.clear(): void`
+Remove all registered services from this container. Permitted on a locked
+container. Child scopes already created keep their own snapshot and are
+unaffected.
+
+#### `container.lock(): void`
+Lock the container so no further services can be registered. Locking blocks
+**registration only** — `remove()`, `clear()` and `resolve()` all keep working.
+There is no unlock, and child scopes created with `scope()` start unlocked.
+After locking, `register()` throws a `DIError` with `code === ErrorCode.Locked`.
+
+#### `container.isLocked(): boolean`
+Check whether the container is locked. A native failure throws rather than
+reporting `false` (see [Error signalling](#error-signalling)).
 
 #### `container.scope(): Container`
-Create a child scope that inherits parent services.
+Create a child scope that inherits parent services. Inheritance is a snapshot
+taken at creation time, and the child starts unlocked regardless of the
+parent's lock state.
 
 #### `container.serviceCount: number`
 Get the number of registered services.
@@ -181,8 +245,42 @@ enum ErrorCode {
   AlreadyRegistered = 3,
   InternalError = 4,
   SerializationError = 5,
+  Locked = 6, // Container is locked - registration is not allowed
 }
 ```
+
+An error code the native library returns but this build does not know about
+(for example a newer library adding a code) produces a `DIError` carrying that
+raw code and the message `Unknown error code: <n>`.
+
+### Error signalling
+
+The native ABI reports the boolean-ish predicates `di_contains` and
+`di_is_locked` as an `int32_t`: `1` for true, `0` for false, and **`-1` for
+"an error occurred"** — an internal error or an invalid argument, with the
+detail available from `di_error_message()`.
+
+`-1` is *not* false. Collapsing it would report an internal failure as a
+confident "the service is not registered" / "the container is not locked", so
+this binding throws a `DIError` (`ErrorCode.InternalError`, carrying the native
+message) instead:
+
+```typescript
+try {
+  if (container.contains('Config')) {
+    // ...
+  }
+} catch (error) {
+  if (error instanceof DIError) {
+    // A genuine failure, distinct from "not registered".
+    console.error(error.message);
+  }
+}
+```
+
+`remove()` is the one place where a non-`Ok` code is folded into a boolean, and
+only for `NotFound`: "there was nothing to remove" is an outcome, not a
+failure. Every other code throws.
 
 ## Development
 
