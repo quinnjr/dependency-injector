@@ -378,10 +378,25 @@ func BenchmarkConcurrentReads(b *testing.B) {
 		})
 	})
 
-	// Uber dig - Note: dig is not designed for concurrent resolution
+	// Uber dig
+	//
+	// dig memoizes a constructor's result into container-internal maps on the
+	// FIRST resolution, so racing that first Invoke across goroutines is a
+	// genuine data race (confirmed with -race: it aborts the test binary with
+	// "concurrent map read and map write"). Resolve once up front so every
+	// parallel iteration takes the memoized read path.
+	//
+	// This also makes the comparison apples-to-apples: every other target here
+	// registers before RunParallel, so they all measure warm concurrent reads.
+	// Note dig does not document Invoke as safe for concurrent use even when
+	// warm; callers who resolve lazily still need external synchronization.
 	b.Run("uber_dig", func(b *testing.B) {
 		container := dig.New()
 		_ = container.Provide(NewConfig)
+		// Warm the memoized value before going parallel.
+		_ = container.Invoke(func(c *Config) {
+			_ = c
+		})
 		b.RunParallel(func(pb *testing.PB) {
 			for pb.Next() {
 				_ = container.Invoke(func(c *Config) {
@@ -484,4 +499,3 @@ func BenchmarkMixedWorkload(b *testing.B) {
 		}
 	})
 }
-
