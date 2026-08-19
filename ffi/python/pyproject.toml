@@ -4,12 +4,12 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "dependency-injector-rust"
-version = "0.2.2"
+version = "2.1.0"
 description = "Python bindings for the high-performance Rust dependency injection container"
 readme = "README.md"
 license = {text = "MIT OR Apache-2.0"}
 authors = [
-    {name = "Pegasus Heavy Industries"}
+    {name = "Joseph R. Quinn"}
 ]
 keywords = ["dependency-injection", "di", "ioc", "container", "rust", "ffi"]
 classifiers = [
@@ -37,10 +37,10 @@ dev = [
 ]
 
 [project.urls]
-Homepage = "https://github.com/pegasusheavy/dependency-injector"
+Homepage = "https://github.com/quinnjr/dependency-injector"
 Documentation = "https://docs.rs/dependency-injector"
-Repository = "https://github.com/pegasusheavy/dependency-injector"
-Issues = "https://github.com/pegasusheavy/dependency-injector/issues"
+Repository = "https://github.com/quinnjr/dependency-injector"
+Issues = "https://github.com/quinnjr/dependency-injector/issues"
 
 [tool.setuptools.packages.find]
 where = ["."]

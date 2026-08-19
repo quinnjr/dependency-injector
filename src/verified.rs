@@ -68,6 +68,7 @@ use std::sync::Arc;
 /// - `Arc<T>` - Single required dependency
 /// - `(Arc<A>, Arc<B>)` - Multiple dependencies (tuples up to 12)
 /// - `Option<Arc<T>>` - Optional dependency
+/// - `(Arc<A>, Option<Arc<B>>)` - Tuples may mix required and optional
 ///
 /// # Example
 ///
@@ -120,8 +121,9 @@ pub trait Service: Injectable + Sized {
 /// This is automatically implemented for:
 /// - `()` - No dependencies
 /// - `Arc<T>` - Single service
-/// - Tuples of `Arc<T>` - Multiple services
 /// - `Option<Arc<T>>` - Optional service
+/// - Tuples of resolvable elements - Multiple services, mixing required
+///   and optional dependencies as needed
 pub trait Resolvable: Sized {
     /// Resolve this dependency from the container.
     ///
@@ -154,12 +156,17 @@ impl<T: Injectable> Resolvable for Option<Arc<T>> {
 }
 
 // Tuple implementations (2-12 elements)
+//
+// Each element only needs to be `Resolvable` itself, so tuples may freely mix
+// required (`Arc<T>`) and optional (`Option<Arc<T>>`) dependencies. A missing
+// required element fails resolution of the whole tuple; a missing optional
+// element resolves to `None`.
 macro_rules! impl_resolvable_tuple {
     ($($T:ident),+) => {
-        impl<$($T: Injectable),+> Resolvable for ($(Arc<$T>,)+) {
+        impl<$($T: Resolvable),+> Resolvable for ($($T,)+) {
             #[inline]
             fn resolve(container: &Container) -> Option<Self> {
-                Some(($(container.try_get::<$T>()?,)+))
+                Some(($($T::resolve(container)?,)+))
             }
         }
     };
@@ -441,6 +448,20 @@ mod tests {
         }
     }
 
+    #[derive(Clone)]
+    struct MixedDeps {
+        db: Arc<Database>,
+        cache: Option<Arc<Cache>>,
+    }
+
+    impl Service for MixedDeps {
+        type Dependencies = (Arc<Database>, Option<Arc<Cache>>);
+
+        fn create((db, cache): (Arc<Database>, Option<Arc<Cache>>)) -> Self {
+            MixedDeps { db, cache }
+        }
+    }
+
     #[test]
     fn test_service_no_deps() {
         let container = Container::new();
@@ -555,6 +576,40 @@ mod tests {
     }
 
     #[test]
+    fn test_mixed_tuple_both_registered() {
+        let container = Container::new();
+        container.provide::<Config>();
+        container.provide::<Database>();
+        container.provide::<Cache>();
+        container.provide::<MixedDeps>();
+
+        let svc = container.get::<MixedDeps>().unwrap();
+        assert_eq!(svc.db.url, "debug://localhost");
+        assert!(svc.cache.is_some());
+    }
+
+    #[test]
+    fn test_mixed_tuple_optional_missing() {
+        let container = Container::new();
+        container.provide::<Config>();
+        container.provide::<Database>();
+        // Cache not registered - optional dep resolves to None
+        container.provide::<MixedDeps>();
+
+        let svc = container.get::<MixedDeps>().unwrap();
+        assert_eq!(svc.db.url, "debug://localhost");
+        assert!(svc.cache.is_none());
+    }
+
+    #[test]
+    fn test_mixed_tuple_required_missing() {
+        let container = Container::new();
+        // Database not registered - required dep missing, resolution fails
+        assert!(<(Arc<Database>, Option<Arc<Cache>>) as Resolvable>::resolve(&container).is_none());
+        assert!(!container.provide_singleton::<MixedDeps>());
+    }
+
+    #[test]
     fn test_dependency_info() {
         assert_eq!(
             <() as DependencyInfo>::dependency_names(),
@@ -587,5 +642,17 @@ mod tests {
         assert!(container.contains::<Config>());
         assert!(container.contains::<Cache>());
     }
-}
+    #[test]
+    fn test_all_arc_tuple_trait_call_inference() {
+        // Pins the annotated-binding trait-call form: the element-wise
+        // generalization of the tuple impls must keep this resolving
+        // without a turbofish on the impl.
+        let container = Container::new();
+        container.singleton(Config { debug: true });
+        assert!(container.provide_singleton::<Database>());
+        assert!(container.provide_singleton::<Cache>());
 
+        let resolved: Option<(Arc<Database>, Arc<Cache>)> = Resolvable::resolve(&container);
+        assert!(resolved.is_some());
+    }
+}

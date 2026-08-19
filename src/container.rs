@@ -4,12 +4,12 @@
 //! resolves dependencies with minimal overhead.
 
 use crate::factory::AnyFactory;
-use crate::storage::{downcast_arc_unchecked, ServiceStorage};
+use crate::storage::{ServiceStorage, downcast_arc_unchecked};
 use crate::{DiError, Injectable, Result};
 use std::any::{Any, TypeId};
 use std::cell::UnsafeCell;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 #[cfg(feature = "logging")]
 use tracing::{debug, trace};
@@ -19,7 +19,8 @@ use tracing::{debug, trace};
 // =============================================================================
 
 /// Number of slots in the thread-local hot cache (power of 2 for fast indexing)
-/// 4 slots fits in a single cache line and provides good hit rates for typical apps.
+/// 4 slots keeps the cache compact (a few cache lines) and provides good hit
+/// rates for typical apps.
 const HOT_CACHE_SLOTS: usize = 4;
 
 /// A cached service entry
@@ -31,6 +32,10 @@ struct CacheEntry {
     type_hash: u64,
     /// Pointer to the storage this was resolved from (for scope identity)
     storage_ptr: usize,
+    /// Storage generation at the time of caching (for staleness detection).
+    /// Generations are stamped by `ServiceStorage` on every mutation and are
+    /// globally unique, which also defeats `Arc::as_ptr` ABA reuse.
+    generation: u64,
     /// The cached service
     service: Arc<dyn Any + Send + Sync>,
 }
@@ -54,14 +59,20 @@ impl HotCache {
     ///
     /// Phase 12+13 optimization: Uses UnsafeCell (no RefCell borrow check)
     /// and pre-computed type_hash (no transmute on lookup).
+    ///
+    /// The entry only hits if its generation matches the storage's current
+    /// generation, so entries cached before a mutation are never returned.
     #[inline(always)]
-    fn get<T: Send + Sync + 'static>(&self, storage_ptr: usize) -> Option<Arc<T>> {
+    fn get<T: Send + Sync + 'static>(&self, storage_ptr: usize, generation: u64) -> Option<Arc<T>> {
         let type_hash = Self::type_hash::<T>();
         let slot = Self::slot_for_hash(type_hash, storage_ptr);
 
         if let Some(entry) = &self.entries[slot] {
             // Phase 13: Compare u64 hash directly (faster than TypeId comparison)
-            if entry.type_hash == type_hash && entry.storage_ptr == storage_ptr {
+            if entry.type_hash == type_hash
+                && entry.storage_ptr == storage_ptr
+                && entry.generation == generation
+            {
                 // Cache hit - clone and downcast (unchecked since type_hash matches)
                 // SAFETY: We verified type_hash matches, so the Arc contains type T
                 let arc = entry.service.clone();
@@ -73,13 +84,14 @@ impl HotCache {
 
     /// Insert a service into the cache for a specific container
     #[inline]
-    fn insert<T: Injectable>(&mut self, storage_ptr: usize, service: Arc<T>) {
+    fn insert<T: Injectable>(&mut self, storage_ptr: usize, generation: u64, service: Arc<T>) {
         let type_hash = Self::type_hash::<T>();
         let slot = Self::slot_for_hash(type_hash, storage_ptr);
 
         self.entries[slot] = Some(CacheEntry {
             type_hash,
             storage_ptr,
+            generation,
             service: service as Arc<dyn Any + Send + Sync>,
         });
     }
@@ -300,6 +312,7 @@ impl Container {
         self.check_not_locked();
 
         let type_id = TypeId::of::<T>();
+        #[cfg(feature = "logging")]
         let type_name = std::any::type_name::<T>();
 
         #[cfg(feature = "logging")]
@@ -313,7 +326,8 @@ impl Container {
         );
 
         // Phase 2: Use enum-based AnyFactory directly
-        self.storage.insert(type_id, AnyFactory::singleton(instance));
+        self.storage
+            .insert(type_id, AnyFactory::singleton(instance));
     }
 
     /// Register a lazy singleton service.
@@ -341,6 +355,7 @@ impl Container {
         self.check_not_locked();
 
         let type_id = TypeId::of::<T>();
+        #[cfg(feature = "logging")]
         let type_name = std::any::type_name::<T>();
 
         #[cfg(feature = "logging")]
@@ -387,6 +402,7 @@ impl Container {
         self.check_not_locked();
 
         let type_id = TypeId::of::<T>();
+        #[cfg(feature = "logging")]
         let type_name = std::any::type_name::<T>();
 
         #[cfg(feature = "logging")]
@@ -469,9 +485,12 @@ impl Container {
         // Get storage pointer for cache key (unique per container scope)
         let storage_ptr = Arc::as_ptr(&self.storage) as usize;
 
+        // Current storage generation - entries cached before a mutation won't match it
+        let generation = self.storage.generation();
+
         // Phase 5+12: Check thread-local hot cache first (UnsafeCell, no RefCell overhead)
         // Note: Transients won't be in cache, so they'll fall through to get_and_cache
-        if let Some(cached) = with_hot_cache(|cache| cache.get::<T>(storage_ptr)) {
+        if let Some(cached) = with_hot_cache(|cache| cache.get::<T>(storage_ptr, generation)) {
             #[cfg(feature = "logging")]
             trace!(
                 target: "dependency_injector",
@@ -484,7 +503,7 @@ impl Container {
         }
 
         // Cache miss - resolve normally and cache the result (unless transient)
-        self.get_and_cache::<T>(storage_ptr)
+        self.get_and_cache::<T>(storage_ptr, generation)
     }
 
     /// Internal: Resolve and cache a service
@@ -492,7 +511,7 @@ impl Container {
     /// Phase 15 optimization: Fast path for root containers (depth == 0) avoids
     /// function call overhead to resolve_from_parents when there are no parents.
     #[inline]
-    fn get_and_cache<T: Injectable>(&self, storage_ptr: usize) -> Result<Arc<T>> {
+    fn get_and_cache<T: Injectable>(&self, storage_ptr: usize, generation: u64) -> Result<Arc<T>> {
         let type_id = TypeId::of::<T>();
 
         #[cfg(feature = "logging")]
@@ -520,7 +539,9 @@ impl Container {
 
             // Cache non-transient services (transients create new instances each time)
             if !is_transient {
-                with_hot_cache_mut(|cache| cache.insert(storage_ptr, Arc::clone(&service)));
+                with_hot_cache_mut(|cache| {
+                    cache.insert(storage_ptr, generation, Arc::clone(&service));
+                });
             }
 
             return Ok(service);
@@ -538,7 +559,7 @@ impl Container {
         }
 
         // Walk parent chain (cold path)
-        self.resolve_from_parents::<T>(&type_id, storage_ptr)
+        self.resolve_from_parents::<T>(&type_id)
     }
 
     /// Resolve from parent chain (internal)
@@ -549,7 +570,8 @@ impl Container {
     /// Phase 14 optimization: Marked as cold to improve branch prediction in the
     /// hot path - most resolutions hit the cache and don't need parent traversal.
     #[cold]
-    fn resolve_from_parents<T: Injectable>(&self, type_id: &TypeId, storage_ptr: usize) -> Result<Arc<T>> {
+    fn resolve_from_parents<T: Injectable>(&self, type_id: &TypeId) -> Result<Arc<T>> {
+        #[cfg(feature = "logging")]
         let type_name = std::any::type_name::<T>();
 
         #[cfg(feature = "logging")]
@@ -580,11 +602,12 @@ impl Container {
                     "Service resolved from ancestor scope"
                 );
 
-                // Cache non-transient services from parent (using child's storage ptr as key)
-                if !storage.is_transient(type_id) {
-                    with_hot_cache_mut(|cache| cache.insert(storage_ptr, Arc::clone(&typed)));
-                }
-
+                // Deliberately NOT hot-cached: an entry would be stamped with
+                // the child's generation, which ancestor mutations never bump,
+                // so a re-registration or clear() in the parent could serve a
+                // stale value from this thread's cache indefinitely. Only
+                // same-storage resolutions are cached (see `get_and_cache`);
+                // this path is #[cold] and parent-chain walks stay correct.
                 return Ok(typed);
             }
             current = storage.parent();
@@ -604,14 +627,16 @@ impl Container {
 
     /// Clear the thread-local hot cache.
     ///
-    /// Call this after modifying the container (registering/removing services)
-    /// if you want subsequent resolutions to see the changes immediately.
+    /// The cache is automatically invalidated whenever this container is
+    /// mutated (services registered, removed, or cleared), so calling this
+    /// manually is rarely necessary. It remains available for explicit
+    /// control, e.g. to release the cached `Arc`s held by the current thread.
     ///
-    /// Note: The cache is automatically invalidated when services are
-    /// re-registered, but this method can be used for explicit control.
+    /// Note: This clears the calling thread's entire hot cache, including
+    /// entries cached for other containers.
     #[inline]
     pub fn clear_cache(&self) {
-        with_hot_cache_mut(|cache| cache.clear());
+        with_hot_cache_mut(HotCache::clear);
     }
 
     /// Pre-warm the thread-local cache with a specific service type.
@@ -718,6 +743,62 @@ impl Container {
         self.depth
     }
 
+    /// Format a human-readable summary of every registration visible to this
+    /// container, for logging when a resolution unexpectedly fails.
+    ///
+    /// The summary lists the scope depth, the number of services registered
+    /// in each scope of the parent chain, and the [`TypeId`] of every
+    /// registration. The container stores services by `TypeId` only (type
+    /// names are not retained), so pair this output with the `type_name`
+    /// carried by [`DiError::NotFound`] when diagnosing a failed resolve.
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use dependency_injector::Container;
+    ///
+    /// #[derive(Clone)]
+    /// struct MyService;
+    ///
+    /// let root = Container::new();
+    /// root.singleton(MyService);
+    ///
+    /// let scope = root.scope();
+    /// if scope.get::<String>().is_err() {
+    ///     eprintln!("{}", scope.debug_registrations());
+    /// }
+    /// ```
+    pub fn debug_registrations(&self) -> String {
+        use std::fmt::Write;
+
+        let mut out = format!("Container registrations (scope depth {}):\n", self.depth);
+        let mut total = 0usize;
+        let mut current = Some(&self.storage);
+        let mut depth = self.depth;
+        let mut is_local = true;
+
+        while let Some(storage) = current {
+            let type_ids = storage.type_ids();
+            total += type_ids.len();
+            let location = if is_local {
+                "current scope"
+            } else {
+                "ancestor"
+            };
+            let _ = writeln!(
+                out,
+                "  {location} (depth {depth}): {} registered: {type_ids:?}",
+                type_ids.len()
+            );
+            current = storage.parent();
+            depth = depth.saturating_sub(1);
+            is_local = false;
+        }
+
+        let _ = write!(out, "  total: {total} service(s) in scope chain");
+        out
+    }
+
     // =========================================================================
     // Lifecycle Methods
     // =========================================================================
@@ -774,6 +855,7 @@ impl Container {
     /// Does not affect parent scopes.
     #[inline]
     pub fn clear(&self) {
+        #[cfg(feature = "logging")]
         let count = self.storage.len();
         self.storage.clear();
 
@@ -784,6 +866,43 @@ impl Container {
             services_removed = count,
             "Container cleared - all services removed from this scope"
         );
+    }
+
+    /// Remove a service registration from this scope.
+    ///
+    /// Returns `true` if a service of type `T` was registered in this scope
+    /// and has been removed, `false` otherwise. Does not affect parent scopes.
+    /// Like [`clear`](Self::clear), removal is permitted on a locked
+    /// container (locking prevents new registrations, not removal).
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use dependency_injector::Container;
+    ///
+    /// #[derive(Clone)]
+    /// struct MyService;
+    ///
+    /// let container = Container::new();
+    /// container.singleton(MyService);
+    ///
+    /// assert!(container.remove::<MyService>());
+    /// assert!(!container.contains::<MyService>());
+    /// assert!(!container.remove::<MyService>()); // Already removed
+    /// ```
+    #[inline]
+    pub fn remove<T: Injectable>(&self) -> bool {
+        let removed = self.storage.remove(&TypeId::of::<T>());
+        if removed {
+            #[cfg(feature = "logging")]
+            debug!(
+                target: "dependency_injector",
+                service = std::any::type_name::<T>(),
+                depth = self.depth,
+                "Service registration removed from this scope"
+            );
+        }
+        removed
     }
 
     /// Panic if locked (internal helper).
@@ -857,7 +976,9 @@ impl Container {
         let start_count = self.storage.len();
 
         // Create a zero-cost batch registrar that wraps the storage
-        f(BatchRegistrar { storage: &self.storage });
+        f(BatchRegistrar {
+            storage: &self.storage,
+        });
 
         #[cfg(feature = "logging")]
         {
@@ -919,7 +1040,8 @@ impl<'a> BatchBuilder<'a> {
     /// Register a singleton and continue the chain
     #[inline]
     pub fn singleton<T: Injectable>(self, instance: T) -> Self {
-        self.storage.insert(TypeId::of::<T>(), AnyFactory::singleton(instance));
+        self.storage
+            .insert(TypeId::of::<T>(), AnyFactory::singleton(instance));
         Self {
             storage: self.storage,
             #[cfg(feature = "logging")]
@@ -933,7 +1055,8 @@ impl<'a> BatchBuilder<'a> {
     where
         F: Fn() -> T + Send + Sync + 'static,
     {
-        self.storage.insert(TypeId::of::<T>(), AnyFactory::lazy(factory));
+        self.storage
+            .insert(TypeId::of::<T>(), AnyFactory::lazy(factory));
         Self {
             storage: self.storage,
             #[cfg(feature = "logging")]
@@ -947,7 +1070,8 @@ impl<'a> BatchBuilder<'a> {
     where
         F: Fn() -> T + Send + Sync + 'static,
     {
-        self.storage.insert(TypeId::of::<T>(), AnyFactory::transient(factory));
+        self.storage
+            .insert(TypeId::of::<T>(), AnyFactory::transient(factory));
         Self {
             storage: self.storage,
             #[cfg(feature = "logging")]
@@ -980,7 +1104,8 @@ impl<'a> BatchRegistrar<'a> {
     /// Register a singleton service (inserted immediately)
     #[inline]
     pub fn singleton<T: Injectable>(&self, instance: T) {
-        self.storage.insert(TypeId::of::<T>(), AnyFactory::singleton(instance));
+        self.storage
+            .insert(TypeId::of::<T>(), AnyFactory::singleton(instance));
     }
 
     /// Register a lazy singleton service (inserted immediately)
@@ -989,7 +1114,8 @@ impl<'a> BatchRegistrar<'a> {
     where
         F: Fn() -> T + Send + Sync + 'static,
     {
-        self.storage.insert(TypeId::of::<T>(), AnyFactory::lazy(factory));
+        self.storage
+            .insert(TypeId::of::<T>(), AnyFactory::lazy(factory));
     }
 
     /// Register a transient service (inserted immediately)
@@ -998,7 +1124,8 @@ impl<'a> BatchRegistrar<'a> {
     where
         F: Fn() -> T + Send + Sync + 'static,
     {
-        self.storage.insert(TypeId::of::<T>(), AnyFactory::transient(factory));
+        self.storage
+            .insert(TypeId::of::<T>(), AnyFactory::transient(factory));
     }
 }
 
@@ -1157,7 +1284,9 @@ impl ScopePool {
                     "Pool empty, creating new scope"
                 );
                 (
-                    Arc::new(ServiceStorage::with_parent(Arc::clone(&self.parent_storage))),
+                    Arc::new(ServiceStorage::with_parent(Arc::clone(
+                        &self.parent_storage,
+                    ))),
                     Arc::new(AtomicBool::new(false)),
                 )
             }
@@ -1179,7 +1308,9 @@ impl ScopePool {
     /// Return a scope to the pool (internal use).
     #[inline]
     fn release(&self, container: Container) {
-        // Clear storage for reuse (parent reference is preserved)
+        // Clear storage for reuse (parent reference is preserved). The clear
+        // stamps a fresh generation, invalidating hot cache entries for this
+        // scope (including lingering clones of the container).
         container.storage.clear();
         // Reset lock state
         container.locked.store(false, Ordering::Relaxed);
@@ -1213,7 +1344,7 @@ pub struct PooledScope<'a> {
     pool: &'a ScopePool,
 }
 
-impl<'a> PooledScope<'a> {
+impl PooledScope<'_> {
     /// Get a reference to the underlying container.
     #[inline]
     pub fn container(&self) -> &Container {
@@ -1221,7 +1352,7 @@ impl<'a> PooledScope<'a> {
     }
 }
 
-impl<'a> std::ops::Deref for PooledScope<'a> {
+impl std::ops::Deref for PooledScope<'_> {
     type Target = Container;
 
     #[inline]
@@ -1230,7 +1361,7 @@ impl<'a> std::ops::Deref for PooledScope<'a> {
     }
 }
 
-impl<'a> Drop for PooledScope<'a> {
+impl Drop for PooledScope<'_> {
     fn drop(&mut self) {
         if let Some(container) = self.container.take() {
             self.pool.release(container);
@@ -1251,7 +1382,7 @@ impl std::fmt::Debug for Container {
             .field("depth", &self.depth)
             .field("has_parent", &self.parent_storage.is_some())
             .field("locked", &self.is_locked())
-            .finish()
+            .finish_non_exhaustive()
     }
 }
 
@@ -1260,9 +1391,10 @@ impl std::fmt::Debug for Container {
 // =========================================================================
 
 // Container is Send + Sync because:
-// - ServiceStorage uses DashMap (thread-safe)
-// - parent is Weak<...> which is Send + Sync
-// - locked uses AtomicBool (Send + Sync)
+// - storage is Arc<ServiceStorage>, which uses DashMap (thread-safe)
+// - parent_storage is Option<Arc<ServiceStorage>> (Send + Sync)
+// - locked is Arc<AtomicBool> (Send + Sync)
+// - depth is a plain u32 (trivially Send + Sync)
 unsafe impl Send for Container {}
 unsafe impl Sync for Container {}
 
@@ -1379,6 +1511,69 @@ mod tests {
         let container = Container::new();
         let result = container.get::<TestService>();
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_not_found_message_names_type_and_hints_at_diagnostics() {
+        let container = Container::new();
+
+        // Root fast path (get_and_cache)
+        let message = container.get::<TestService>().err().unwrap().to_string();
+        assert!(message.contains("TestService"));
+        assert!(message.contains("different scope"));
+        assert!(message.contains("Container::debug_registrations()"));
+
+        // Parent-chain path (resolve_from_parents) produces the same message
+        let scope = container.scope();
+        let scoped_message = scope.get::<TestService>().err().unwrap().to_string();
+        assert_eq!(message, scoped_message);
+    }
+
+    #[test]
+    fn test_debug_registrations_reflects_count_and_depth() {
+        let root = Container::new();
+        root.singleton(TestService {
+            value: "root".into(),
+        });
+
+        let child = root.scope();
+        child.singleton(AnotherService {
+            name: "child".into(),
+        });
+
+        let summary = child.debug_registrations();
+        assert!(summary.contains("scope depth 1"));
+        assert!(summary.contains("current scope (depth 1): 1 registered"));
+        assert!(summary.contains("ancestor (depth 0): 1 registered"));
+        assert!(summary.contains("total: 2 service(s) in scope chain"));
+
+        // The root's summary only covers its own scope
+        let root_summary = root.debug_registrations();
+        assert!(root_summary.contains("scope depth 0"));
+        assert!(root_summary.contains("current scope (depth 0): 1 registered"));
+        assert!(!root_summary.contains("ancestor"));
+        assert!(root_summary.contains("total: 1 service(s) in scope chain"));
+    }
+
+    #[test]
+    fn test_debug_registrations_empty_container() {
+        let container = Container::new();
+        let summary = container.debug_registrations();
+        assert!(summary.contains("current scope (depth 0): 0 registered"));
+        assert!(summary.contains("total: 0 service(s) in scope chain"));
+    }
+
+    #[test]
+    fn test_debug_registrations_lists_type_ids() {
+        let container = Container::new();
+        container.singleton(TestService {
+            value: "listed".into(),
+        });
+
+        // The TypeId debug representation of the registered service appears
+        let expected = format!("{:?}", TypeId::of::<TestService>());
+        let summary = container.debug_registrations();
+        assert!(summary.contains(&expected));
     }
 
     #[test]
@@ -1528,9 +1723,18 @@ mod tests {
         leaf.singleton(LeafService(4));
 
         // Leaf should be able to access all ancestor services
-        assert!(leaf.contains::<RootService>(), "Should find root service in leaf");
-        assert!(leaf.contains::<MiddleService>(), "Should find middle service in leaf");
-        assert!(leaf.contains::<LeafService>(), "Should find leaf service in leaf");
+        assert!(
+            leaf.contains::<RootService>(),
+            "Should find root service in leaf"
+        );
+        assert!(
+            leaf.contains::<MiddleService>(),
+            "Should find middle service in leaf"
+        );
+        assert!(
+            leaf.contains::<LeafService>(),
+            "Should find leaf service in leaf"
+        );
 
         // Verify resolution works
         let root_svc = leaf.get::<RootService>().unwrap();
@@ -1546,5 +1750,280 @@ mod tests {
         assert!(middle2.contains::<RootService>());
         assert!(middle2.contains::<MiddleService>());
         assert!(!middle2.contains::<LeafService>()); // Leaf service not in parent
+    }
+
+    #[test]
+    fn test_cache_invalidated_on_clear() {
+        let container = Container::new();
+        container.singleton(TestService { value: "v1".into() });
+
+        // Populate the thread-local hot cache
+        assert_eq!(container.get::<TestService>().unwrap().value, "v1");
+
+        // After clear(), the cached entry must not be served
+        container.clear();
+        assert!(container.get::<TestService>().is_err());
+    }
+
+    #[test]
+    fn test_cache_invalidated_on_reregistration() {
+        let container = Container::new();
+        container.singleton(TestService { value: "v1".into() });
+
+        // Populate the thread-local hot cache
+        assert_eq!(container.get::<TestService>().unwrap().value, "v1");
+
+        // Re-registering the same type overwrites the previous instance
+        container.singleton(TestService { value: "v2".into() });
+        assert_eq!(container.get::<TestService>().unwrap().value, "v2");
+    }
+
+    #[test]
+    fn test_parent_mutation_visible_through_child_scope() {
+        // Parent-resolved services are deliberately not hot-cached (see
+        // resolve_from_parents), so mutations of an ancestor scope must be
+        // visible through child scopes on the same thread.
+        let root = Container::new();
+        root.singleton(TestService { value: "v1".into() });
+
+        let scope = root.scope();
+        assert_eq!(scope.get::<TestService>().unwrap().value, "v1");
+
+        // Re-register in the parent: the child must observe the new value
+        root.singleton(TestService { value: "v2".into() });
+        assert_eq!(scope.get::<TestService>().unwrap().value, "v2");
+
+        // Clear the parent: the child must observe the removal
+        root.clear();
+        assert!(scope.get::<TestService>().is_err());
+    }
+
+    #[test]
+    fn test_parent_singleton_identity_through_child() {
+        // Parent-resolved services are not hot-cached; repeated resolution
+        // through a child scope must still return the same Arc instance.
+        let root = Container::new();
+        root.singleton(TestService {
+            value: "shared".into(),
+        });
+
+        let child = root.scope();
+        let a = child.get::<TestService>().unwrap();
+        let b = child.get::<TestService>().unwrap();
+        assert!(Arc::ptr_eq(&a, &b));
+    }
+
+    #[test]
+    fn test_remove_when_locked() {
+        // Locking prevents new registrations; like clear(), remove is
+        // still permitted (pinned behavior — see the remove() docs).
+        let container = Container::new();
+        container.singleton(TestService { value: "v".into() });
+        container.lock();
+
+        assert!(container.remove::<TestService>());
+        assert!(!container.contains::<TestService>());
+    }
+
+    #[test]
+    fn test_remove_in_child_does_not_affect_parent() {
+        let root = Container::new();
+        root.singleton(TestService {
+            value: "root".into(),
+        });
+
+        let child = root.scope();
+        // Removing a parent-only registration from the child is a no-op
+        assert!(!child.remove::<TestService>());
+        assert!(root.contains::<TestService>());
+
+        // A child override can be removed without touching the parent
+        child.singleton(TestService {
+            value: "child".into(),
+        });
+        assert!(child.remove::<TestService>());
+        assert!(root.contains::<TestService>());
+        assert_eq!(root.get::<TestService>().unwrap().value, "root");
+        // Child falls back to the parent's registration again
+        assert_eq!(child.get::<TestService>().unwrap().value, "root");
+    }
+
+    #[test]
+    fn test_pool_reuse_invalidates_hot_cache() {
+        #[derive(Clone)]
+        struct RequestId(u64);
+
+        let root = Container::new();
+        let pool = ScopePool::new(&root, 1);
+
+        {
+            let scope = pool.acquire();
+            scope.singleton(RequestId(1));
+            // Populate the thread-local hot cache for this storage
+            assert_eq!(scope.get::<RequestId>().unwrap().0, 1);
+        }
+
+        // Same storage is reused; the release-path clear() must have
+        // stamped a fresh generation so the cached RequestId(1) cannot hit.
+        {
+            let scope = pool.acquire();
+            assert!(scope.get::<RequestId>().is_err());
+            scope.singleton(RequestId(2));
+            assert_eq!(scope.get::<RequestId>().unwrap().0, 2);
+        }
+    }
+
+    #[test]
+    fn test_cross_thread_invalidation_monotonic() {
+        // A reader must never observe an older value after a newer one:
+        // the Release stores in ServiceStorage's mutators paired with the
+        // Acquire load in generation() make re-registrations publish to
+        // readers' hot caches. (Single values are compared, so this test
+        // is deterministic-safe: it can miss a regression but never
+        // false-positives.)
+        use std::sync::atomic::AtomicBool as StopFlag;
+
+        #[derive(Clone)]
+        struct Counter(u64);
+
+        let container = Container::new();
+        container.singleton(Counter(0));
+        let done = Arc::new(StopFlag::new(false));
+
+        let writer = {
+            let c = container.clone();
+            let done = Arc::clone(&done);
+            std::thread::spawn(move || {
+                for i in 1..=2_000u64 {
+                    c.singleton(Counter(i));
+                }
+                done.store(true, Ordering::Release);
+            })
+        };
+
+        let reader = {
+            let c = container.clone();
+            let done = Arc::clone(&done);
+            std::thread::spawn(move || {
+                let mut last = 0u64;
+                while !done.load(Ordering::Acquire) {
+                    let v = c.get::<Counter>().unwrap().0;
+                    assert!(v >= last, "stale read: observed {v} after {last}");
+                    last = v;
+                }
+            })
+        };
+
+        writer.join().unwrap();
+        reader.join().unwrap();
+    }
+
+    #[test]
+    fn test_mutation_does_not_affect_other_container_cache() {
+        let a = Container::new();
+        let b = Container::new();
+        a.singleton(TestService { value: "a".into() });
+        b.singleton(TestService { value: "b".into() });
+
+        // Populate the hot cache for both containers
+        assert_eq!(a.get::<TestService>().unwrap().value, "a");
+        let b1 = b.get::<TestService>().unwrap();
+        assert_eq!(b1.value, "b");
+
+        // Mutating `a` must not disturb `b`'s cached resolution
+        a.clear();
+        assert!(a.get::<TestService>().is_err());
+        let b2 = b.get::<TestService>().unwrap();
+        assert_eq!(b2.value, "b");
+        assert!(Arc::ptr_eq(&b1, &b2));
+    }
+
+    #[test]
+    fn test_remove() {
+        let container = Container::new();
+        container.singleton(TestService {
+            value: "test".into(),
+        });
+        assert!(container.contains::<TestService>());
+
+        assert!(container.remove::<TestService>());
+        assert!(!container.contains::<TestService>());
+        assert!(container.get::<TestService>().is_err());
+    }
+
+    #[test]
+    fn test_remove_unregistered() {
+        let container = Container::new();
+        assert!(!container.remove::<TestService>());
+    }
+
+    #[test]
+    fn test_remove_invalidates_cache() {
+        let container = Container::new();
+        container.singleton(TestService {
+            value: "cached".into(),
+        });
+
+        // Populate the thread-local hot cache
+        assert_eq!(container.get::<TestService>().unwrap().value, "cached");
+
+        // After remove(), the cached entry must not be served
+        assert!(container.remove::<TestService>());
+        assert!(container.get::<TestService>().is_err());
+    }
+
+    #[cfg(feature = "perfect-hash")]
+    #[test]
+    fn test_freeze() {
+        let container = Container::new();
+        container.singleton(TestService {
+            value: "frozen".into(),
+        });
+
+        let frozen = container.freeze();
+
+        // Freezing locks the container
+        assert!(container.is_locked());
+
+        // The frozen storage resolves the registered service
+        let service = frozen.resolve(&TypeId::of::<TestService>()).unwrap();
+        // SAFETY: We resolved by TypeId::of::<TestService>(), so the Arc
+        // contains a TestService.
+        let typed: Arc<TestService> = unsafe { downcast_arc_unchecked(service) };
+        assert_eq!(typed.value, "frozen");
+        assert_eq!(frozen.len(), 1);
+
+        // The original container still resolves after freezing
+        assert_eq!(container.get::<TestService>().unwrap().value, "frozen");
+    }
+
+    #[test]
+    fn test_warm_cache() {
+        let container = Container::new();
+        container.singleton(TestService {
+            value: "warm".into(),
+        });
+
+        // Pre-warm the cache, then resolve normally
+        container.warm_cache::<TestService>();
+        let service = container.get::<TestService>().unwrap();
+        assert_eq!(service.value, "warm");
+    }
+
+    #[test]
+    fn test_clear_cache() {
+        let container = Container::new();
+        container.singleton(TestService {
+            value: "cached".into(),
+        });
+
+        // Populate the hot cache, then explicitly clear it
+        let s1 = container.get::<TestService>().unwrap();
+        container.clear_cache();
+
+        // Resolution still works, served from storage again
+        let s2 = container.get::<TestService>().unwrap();
+        assert_eq!(s2.value, "cached");
+        assert!(Arc::ptr_eq(&s1, &s2));
     }
 }

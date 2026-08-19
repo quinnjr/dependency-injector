@@ -6,22 +6,38 @@ on:
     paths:
       - '**/Cargo.toml'
       - '**/Cargo.lock'
+      - 'ffi/nodejs/package.json'
+      - 'ffi/nodejs/pnpm-lock.yaml'
+      - 'ffi/python/pyproject.toml'
+      - 'ffi/go/di/go.mod'
+      - 'ffi/go/di/go.sum'
+      - 'ffi/csharp/**/*.csproj'
   pull_request:
     branches: [main, master]
     paths:
       - '**/Cargo.toml'
       - '**/Cargo.lock'
+      - 'ffi/nodejs/package.json'
+      - 'ffi/nodejs/pnpm-lock.yaml'
+      - 'ffi/python/pyproject.toml'
+      - 'ffi/go/di/go.mod'
+      - 'ffi/go/di/go.sum'
+      - 'ffi/csharp/**/*.csproj'
   schedule:
     # Run every day at 00:00 UTC
     - cron: '0 0 * * *'
   workflow_dispatch:
 
+permissions:
+  contents: read
+
 jobs:
   audit:
     name: Security Audit
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
@@ -35,8 +51,9 @@ jobs:
   deny:
     name: Dependency Check
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
@@ -46,4 +63,99 @@ jobs:
 
       - name: Check dependencies
         run: cargo deny check || true  # Don't fail until deny.toml is configured
+
+  # The binding-ecosystem audits below are non-blocking (continue-on-error)
+  # because these ecosystems were never audited before. Once each has a clean
+  # baseline, remove continue-on-error to make vulnerabilities fail the build.
+  npm-audit:
+    name: Node.js Audit
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: '22'
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v6
+        with:
+          version: 10
+
+      - name: Run pnpm audit
+        working-directory: ffi/nodejs
+        run: pnpm audit --audit-level=high
+
+  pip-audit:
+    name: Python Audit
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+
+      - name: Install pip-audit
+        run: python -m pip install --upgrade pip pip-audit
+
+      - name: Run pip-audit
+        working-directory: ffi/python
+        run: |
+          # There is no requirements file; install the package so pip-audit can
+          # audit the built package metadata and its resolved dependencies.
+          python -m pip install .
+          pip-audit
+
+  govulncheck:
+    name: Go Audit
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Setup Go
+        uses: actions/setup-go@v6
+        with:
+          go-version: 'stable'
+
+      - name: Install govulncheck
+        run: go install golang.org/x/vuln/cmd/govulncheck@latest
+
+      - name: Run govulncheck
+        working-directory: ffi/go/di
+        run: govulncheck ./...
+
+  dotnet-audit:
+    name: .NET Audit
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v5
+        with:
+          dotnet-version: '8.0.x'
+
+      - name: Restore dependencies
+        working-directory: ffi/csharp
+        run: dotnet restore DependencyInjector.sln
+
+      - name: Check for vulnerable packages
+        working-directory: ffi/csharp
+        run: |
+          dotnet list DependencyInjector.sln package --vulnerable --include-transitive | tee vulnerable.txt
+          if grep -q "has the following vulnerable packages" vulnerable.txt; then
+            echo "::error::Vulnerable NuGet packages detected"
+            exit 1
+          fi
 

@@ -1,10 +1,17 @@
 {
-  "name": "@pegasusheavy/dependency-injector",
-  "version": "0.2.2",
+  "name": "dependency-injector",
+  "version": "2.1.0",
   "description": "Node.js bindings for the high-performance Rust dependency injection container",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
   "type": "module",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    },
+    "./package.json": "./package.json"
+  },
   "packageManager": "pnpm@10.0.0",
   "scripts": {
     "preinstall": "npx only-allow pnpm",
@@ -29,11 +36,11 @@
     "ffi",
     "native"
   ],
-  "author": "Pegasus Heavy Industries",
+  "author": "Joseph R. Quinn",
   "license": "MIT OR Apache-2.0",
   "repository": {
     "type": "git",
-    "url": "https://github.com/pegasusheavy/dependency-injector"
+    "url": "https://github.com/quinnjr/dependency-injector"
   },
   "engines": {
     "node": ">=18.0.0",

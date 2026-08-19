@@ -8,6 +8,7 @@
 package main
 
 import (
+	"strconv"
 	"sync"
 	"testing"
 
@@ -377,10 +378,25 @@ func BenchmarkConcurrentReads(b *testing.B) {
 		})
 	})
 
-	// Uber dig - Note: dig is not designed for concurrent resolution
+	// Uber dig
+	//
+	// dig memoizes a constructor's result into container-internal maps on the
+	// FIRST resolution, so racing that first Invoke across goroutines is a
+	// genuine data race (confirmed with -race: it aborts the test binary with
+	// "concurrent map read and map write"). Resolve once up front so every
+	// parallel iteration takes the memoized read path.
+	//
+	// This also makes the comparison apples-to-apples: every other target here
+	// registers before RunParallel, so they all measure warm concurrent reads.
+	// Note dig does not document Invoke as safe for concurrent use even when
+	// warm; callers who resolve lazily still need external synchronization.
 	b.Run("uber_dig", func(b *testing.B) {
 		container := dig.New()
 		_ = container.Provide(NewConfig)
+		// Warm the memoized value before going parallel.
+		_ = container.Invoke(func(c *Config) {
+			_ = c
+		})
 		b.RunParallel(func(pb *testing.PB) {
 			for pb.Next() {
 				_ = container.Invoke(func(c *Config) {
@@ -422,7 +438,7 @@ func BenchmarkMixedWorkload(b *testing.B) {
 					// 80% - resolve
 					_ = container.Get("config")
 				case 16, 17, 18:
-					// 15% - check existence
+					// 15% - additional resolve (lookup)
 					_ = container.Get("database")
 				default:
 					// 5% - new scope (simulate with new map)
@@ -463,7 +479,6 @@ func BenchmarkMixedWorkload(b *testing.B) {
 		do.Provide(injector, func(i do.Injector) (*Database, error) {
 			return NewDatabase(NewConfig()), nil
 		})
-		scopeCounter := 0
 		b.ResetTimer()
 		for i := 0; i < b.N; i++ {
 			for j := 0; j < 100; j++ {
@@ -473,13 +488,14 @@ func BenchmarkMixedWorkload(b *testing.B) {
 				case 16, 17, 18:
 					_, _ = do.Invoke[*Database](injector)
 				default:
-					// Create a unique scope name each time
-					scopeCounter++
-					// Skip scope creation for now as samber/do doesn't support dynamic scopes well
-					_ = scopeCounter
+					// 5% - create a child scope and register a service in it
+					// (mirrors peers' new-container + register work; samber/do
+					// requires unique scope names, so derive one from the loop
+					// counters)
+					scope := injector.Scope(strconv.Itoa(i*100 + j))
+					do.ProvideValue(scope, NewConfig())
 				}
 			}
 		}
 	})
 }
-

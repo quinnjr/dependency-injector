@@ -1,6 +1,6 @@
 [package]
 name = "dependency-injector"
-version = "0.2.2"
+version = "2.1.0"
 edition = "2024"
 rust-version = "1.85"
 description = "High-performance, lock-free dependency injection container for Rust"
@@ -8,7 +8,7 @@ license = "MIT OR Apache-2.0"
 keywords = ["dependency-injection", "di", "ioc", "container", "service-locator"]
 categories = ["development-tools", "rust-patterns", "concurrency"]
 readme = "README.md"
-repository = "https://github.com/pegasusheavy/dependency-injector"
+repository = "https://github.com/quinnjr/dependency-injector"
 documentation = "https://docs.rs/dependency-injector"
 
 # Files to exclude from crates.io publish
@@ -57,12 +57,24 @@ exclude = [
     "TODO.md",
     "CONTRIBUTING.md",
     "SECURITY.md",
+    "AGENTS.md",
+    "RELEASING.md",
+    "ROADMAP.md",
+    "justfile",
     "*.bak",
     "*.orig",
 ]
 
 # Note: For FFI shared library builds, use:
 #   cargo rustc --release --features ffi --crate-type cdylib
+
+[workspace]
+members = ["dependency-injector-derive"]
+resolver = "3"
+# `fuzz` stays a standalone crate (not a workspace member) so the pre-commit
+# `cargo build --all-targets` and `cargo clippy` runs don't need libfuzzer.
+# Build fuzz targets with `cargo fuzz` from the `fuzz/` directory instead.
+exclude = ["fuzz"]
 
 [features]
 default = ["logging"]
@@ -74,7 +86,7 @@ logging-pretty = ["logging", "dep:tracing-subscriber"]
 logging-json = ["logging", "dep:tracing-subscriber", "tracing-subscriber/json"]
 # Legacy alias
 tracing = ["logging"]
-# Async support
+# Async support (async-initialized singletons: `lazy_async` / `get_async`)
 async = ["dep:tokio"]
 # Derive macros for automatic injection
 derive = ["dep:dependency-injector-derive"]
@@ -104,11 +116,12 @@ tracing = { version = "0.1", optional = true }
 # Log subscriber for formatting (optional)
 tracing-subscriber = { version = "0.3", features = ["env-filter"], optional = true }
 
-# Optional async support
+# Optional async support - only "sync" is needed (tokio::sync::OnceCell);
+# no runtime features, so downstream users pick their own tokio runtime.
 tokio = { version = "1.0", features = ["sync"], optional = true }
 
 # Derive macros (optional)
-dependency-injector-derive = { version = "0.1.0", path = "dependency-injector-derive", optional = true }
+dependency-injector-derive = { version = "2.1.0", path = "dependency-injector-derive", optional = true }
 
 # Minimal perfect hashing for locked containers (optional)
 boomphf = { version = "0.6", optional = true }
@@ -118,7 +131,7 @@ dhat = { version = "0.3", optional = true }
 
 [dev-dependencies]
 tokio = { version = "1.0", features = ["rt-multi-thread", "macros", "time"] }
-criterion = { version = "0.5", features = ["html_reports"] }  # Pin to 0.5 for Rust 1.85 compatibility
+criterion = { version = "0.8.0", features = ["html_reports"] }
 
 # External DI crates for comparison benchmarks
 shaku = "0.6"

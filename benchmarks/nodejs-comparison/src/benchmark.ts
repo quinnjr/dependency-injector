@@ -156,9 +156,22 @@ function createAwilixContainer() {
 // Simple benchmark function
 // =============================================================================
 
+// When DI_BENCH_SMOKE is set to a non-empty value, every benchmark runs a
+// token number of iterations. The resulting timings are meaningless as
+// measurements -- the point is to execute every code path cheaply so CI can
+// catch crashes, import errors and API drift without spending minutes.
+const SMOKE = Boolean(process.env.DI_BENCH_SMOKE);
+const SMOKE_ITERATIONS = 2;
+const SMOKE_WARMUP = 1;
+
 function benchmark(name: string, fn: () => void, iterations = 100000): { name: string; opsPerSec: number; avgNs: number } {
+  const warmup = SMOKE ? SMOKE_WARMUP : 1000;
+  if (SMOKE) {
+    iterations = SMOKE_ITERATIONS;
+  }
+
   // Warm up
-  for (let i = 0; i < 1000; i++) {
+  for (let i = 0; i < warmup; i++) {
     fn();
   }
 
@@ -313,7 +326,10 @@ async function runBenchmarks() {
         } else if (op < 19) {
           inversifyContainer.get(TYPES.Database);
         } else {
-          inversifyContainer.get(TYPES.Config);
+          // 5% - create a child container and resolve from it (inversify 7
+          // replaced createChild() with the parent container option)
+          const scope = new InversifyContainer({ parent: inversifyContainer });
+          scope.get(TYPES.Config);
         }
       }
     }, 10000),
@@ -347,8 +363,10 @@ async function runBenchmarks() {
   console.log('============================\n');
 
   console.log('For comparison with Rust dependency-injector:');
-  console.log('- Rust singleton resolution: ~17-32 ns');
-  console.log('- Rust mixed workload (100 ops): ~2.2 µs');
+  console.log('- Rust singleton resolution: ~9.30 ns');
+  console.log('- Rust mixed workload (100 ops): ~1.60 µs');
+  console.log('  (measured on the machine described in BENCHMARK_COMPARISON.md,');
+  console.log('   not re-measured live here)');
   console.log('');
   console.log('Best Node.js times from this benchmark:');
   console.log(`- Singleton resolution: ${singletonResults[0].avgNs.toFixed(0)} ns (manual_di)`);

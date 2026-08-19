@@ -173,7 +173,7 @@ impl LoggingBuilder {
     /// Requires either `logging-json` or `logging-pretty` feature to be enabled.
     #[cfg(any(feature = "logging-json", feature = "logging-pretty"))]
     pub fn init(self) {
-        use tracing_subscriber::{fmt, prelude::*, EnvFilter};
+        use tracing_subscriber::{EnvFilter, fmt, prelude::*};
 
         let filter = if let Some(target) = self.target {
             EnvFilter::new(format!("{}={}", target, self.level))
@@ -361,4 +361,3 @@ mod tests {
         assert_eq!(builder.target, Some("dependency_injector"));
     }
 }
-

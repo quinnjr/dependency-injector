@@ -379,3 +379,4 @@ local/
 # Temporary files
 tmp/
 temp/
+.aider*

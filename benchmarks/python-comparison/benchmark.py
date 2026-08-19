@@ -10,6 +10,7 @@ Compares:
 - punq (lightweight DI)
 """
 
+import os
 import time
 import sys
 from typing import Optional
@@ -137,10 +138,23 @@ def create_punq_container() -> punq.Container:
 # Benchmark utilities
 # =============================================================================
 
+# When DI_BENCH_SMOKE is set to a non-empty value, every benchmark runs a
+# token number of iterations. The resulting timings are meaningless as
+# measurements -- the point is to execute every code path cheaply so CI can
+# catch crashes, import errors and API drift without spending minutes.
+SMOKE = bool(os.environ.get("DI_BENCH_SMOKE"))
+SMOKE_ITERATIONS = 2
+SMOKE_WARMUP = 1
+
+
 def benchmark(name: str, fn, iterations: int = 100000) -> dict:
     """Run a benchmark and return results."""
+    warmup = SMOKE_WARMUP if SMOKE else 1000
+    if SMOKE:
+        iterations = SMOKE_ITERATIONS
+
     # Warm up
-    for _ in range(1000):
+    for _ in range(warmup):
         fn()
 
     # Benchmark
@@ -281,6 +295,9 @@ def main():
             else:
                 ManualContainer()
 
+    # NOTE: the library benchmarks' 5% branch is intentionally per-library
+    # (create-only vs create+register) because scope APIs differ; see each
+    # mixed_* function's inline comment for the deliberate deviation.
     def mixed_dict():
         for i in range(100):
             op = i % 20
@@ -300,7 +317,9 @@ def main():
             elif op < 19:
                 di_container.database()
             else:
-                di_container.config()
+                # 5% - instantiate a fresh declarative container (scope
+                # analogue, mirrors peers' new-container work)
+                DIContainer()
 
     def mixed_google():
         for i in range(100):
@@ -310,7 +329,9 @@ def main():
             elif op < 19:
                 google_injector.get(Database)
             else:
-                google_injector.get(Config)
+                # 5% - create a child injector (injector's real scope
+                # mechanism)
+                google_injector.create_child_injector()
 
     def mixed_punq():
         for i in range(100):
@@ -320,7 +341,11 @@ def main():
             elif op < 19:
                 punq_container.resolve(Database)
             else:
-                punq_container.resolve(Config)
+                # 5% - punq (0.7.x) has no child-scope API, so construct a
+                # fresh container and register a service into it, mirroring
+                # the dict peer's work
+                scope = punq.Container()
+                scope.register(Config, instance=Config())
 
     mixed_results = [
         benchmark("manual_di", mixed_manual, iterations=10000),
@@ -341,8 +366,10 @@ def main():
     print("============================\n")
 
     print("For comparison with Rust dependency-injector:")
-    print("- Rust singleton resolution: ~17-32 ns")
-    print("- Rust mixed workload (100 ops): ~2.2 µs")
+    print("- Rust singleton resolution: ~9.30 ns")
+    print("- Rust mixed workload (100 ops): ~1.60 µs")
+    print("  (measured on the machine described in BENCHMARK_COMPARISON.md,")
+    print("   not re-measured live here)")
     print()
     print("Best Python times from this benchmark:")
     print(f"- Singleton resolution: {singleton_results[0]['avg_ns']:.0f} ns (manual_di)")

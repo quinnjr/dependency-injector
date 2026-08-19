@@ -14,7 +14,7 @@ C# bindings for the high-performance Rust dependency injection container.
 ## Installation
 
 ```bash
-dotnet add package PegasusHeavy.DependencyInjector
+dotnet add package DependencyInjector
 ```
 
 The NuGet package includes pre-built native libraries for:
@@ -34,7 +34,7 @@ If you want to build the native library from source:
 curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
 
 # Clone and build
-git clone https://github.com/pegasusheavy/dependency-injector
+git clone https://github.com/quinnjr/dependency-injector
 cd dependency-injector
 cargo rustc --release --features ffi --crate-type cdylib
 
@@ -131,9 +131,22 @@ T service = container.Resolve<T>();
 T? service = container.TryResolve<T>("TypeName");
 T? service = container.TryResolve<T>();
 
-// Check existence
+// Check existence (throws DIException if the native call reports an error)
 bool exists = container.Contains("TypeName");
 bool exists = container.Contains<T>();
+
+// Remove a service (true if removed, false if it was not registered)
+bool removed = container.Remove("TypeName");
+bool removed = container.Remove<T>();
+
+// Remove every service
+container.Clear();
+
+// Lock against further registration (no unlock)
+container.Lock();
+
+// Query the lock state (throws DIException if the native call reports an error)
+bool locked = container.IsLocked;
 
 // Get service count
 long count = container.ServiceCount;
@@ -175,6 +188,66 @@ catch (DIException ex)
 | 3 | `DiErrorCode.AlreadyRegistered` | Service already exists |
 | 4 | `DiErrorCode.InternalError` | Internal error |
 | 5 | `DiErrorCode.SerializationError` | JSON serialization failed |
+| 6 | `DiErrorCode.Locked` | Container is locked - registration is not allowed |
+
+The enum is append-only: existing values never get renumbered. A code emitted
+by a newer native library than this binding knows about is not a cast or switch
+failure - it surfaces as a `DIException` whose `ErrorCode` carries the raw
+numeric value and whose message reads `Unknown error: <n>`.
+
+## Removal and Locking
+
+```csharp
+using var container = new Container();
+container.Register("Config", new Config(true, 8080, "production"));
+
+Console.WriteLine(container.IsLocked); // false
+container.Lock();
+Console.WriteLine(container.IsLocked); // true
+
+// Locking blocks registration only...
+try
+{
+    container.Register("Late", new Config(false, 9090, "development"));
+}
+catch (DIException ex)
+{
+    Console.WriteLine(ex.ErrorCode); // DiErrorCode.Locked
+}
+
+// ...removal and clearing stay permitted on a locked container.
+container.Remove("Config"); // true
+container.Clear();
+```
+
+There is no unlock. Child containers created with `Scope()` start unlocked
+regardless of the parent's lock state.
+
+## Error Sentinels: `-1` Means Error, Not `false`
+
+The native `di_contains` and `di_is_locked` entry points are tri-state: they
+return `1` (yes), `0` (no), or `-1` (internal error, invalid argument, or a
+caught panic). Per the C header, callers must **not** collapse `-1` into
+`false` - doing so reports a genuine failure as "not registered" / "not
+locked".
+
+This binding surfaces the negative case explicitly:
+
+```csharp
+try
+{
+    if (container.Contains("Config")) { /* ... */ }
+}
+catch (DIException ex)
+{
+    // ex.ErrorCode == DiErrorCode.InternalError
+    // ex.Message   == the native last-error message
+}
+```
+
+`Contains(string)`, `Contains<T>()`, and `IsLocked` therefore each have three
+outcomes - `true`, `false`, or a thrown `DIException` populated from
+`di_error_message()`.
 
 ## Project Structure
 

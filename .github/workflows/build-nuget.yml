@@ -14,12 +14,13 @@ permissions:
   contents: write
 
 env:
-  PACKAGE_NAME: PegasusHeavy.DependencyInjector
+  PACKAGE_NAME: DependencyInjector
 
 jobs:
   build-native:
     name: Build native ${{ matrix.rid }}
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
     strategy:
       fail-fast: false
       matrix:
@@ -38,7 +39,7 @@ jobs:
             cross: true
 
           # macOS x64 (Intel)
-          - os: macos-13
+          - os: macos-15-intel
             rid: osx-x64
             rust_target: x86_64-apple-darwin
             lib_name: libdependency_injector.dylib
@@ -57,10 +58,10 @@ jobs:
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
 
       - name: Install Rust
-        uses: dtolnay/rust-action@stable
+        uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.rust_target }}
 
@@ -76,7 +77,7 @@ jobs:
           cargo rustc --release --target ${{ matrix.rust_target }} --features ffi --crate-type cdylib
 
       - name: Upload native artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: native-${{ matrix.rid }}
           path: target/${{ matrix.rust_target }}/release/${{ matrix.lib_name }}
@@ -85,18 +86,19 @@ jobs:
     name: Build NuGet Package
     needs: build-native
     runs-on: ubuntu-latest
+    timeout-minutes: 15
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
 
       - name: Setup .NET
-        uses: actions/setup-dotnet@v4
+        uses: actions/setup-dotnet@v5
         with:
           dotnet-version: '8.0.x'
 
       - name: Download all native artifacts
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           path: native-artifacts
 
@@ -123,18 +125,27 @@ jobs:
 
       - name: Get version
         id: version
+        env:
+          # Interpolated via env rather than directly in the script so
+          # attacker-controllable values cannot inject shell commands.
+          EVENT_NAME: ${{ github.event_name }}
+          INPUT_VERSION: ${{ github.event.inputs.version }}
         run: |
-          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
-            VERSION="${{ github.event.inputs.version }}"
+          if [ "$EVENT_NAME" = "workflow_dispatch" ]; then
+            VERSION="$INPUT_VERSION"
           else
             VERSION="${GITHUB_REF#refs/tags/v}"
           fi
-          echo "version=${VERSION#v}" >> $GITHUB_OUTPUT
+          echo "version=${VERSION#v}" >> "$GITHUB_OUTPUT"
 
       - name: Update version in csproj
+        env:
+          # Derived from the same workflow_dispatch input, so it is mediated
+          # through env here too rather than expanded into the sed program.
+          VERSION: ${{ steps.version.outputs.version }}
         run: |
           cd ffi/csharp/DependencyInjector
-          sed -i "s/<Version>.*<\/Version>/<Version>${{ steps.version.outputs.version }}<\/Version>/" DependencyInjector.csproj
+          sed -i "s|<Version>.*</Version>|<Version>${VERSION}</Version>|" DependencyInjector.csproj
 
       - name: Build NuGet package
         run: |
@@ -142,7 +153,7 @@ jobs:
           dotnet pack -c Release -o ../packages
 
       - name: Upload NuGet artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: nuget-package
           path: ffi/csharp/packages/*.nupkg
@@ -151,20 +162,21 @@ jobs:
     name: Publish to NuGet
     needs: build-nuget
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     if: startsWith(github.ref, 'refs/tags/v')
     environment:
       name: nuget
-      url: https://www.nuget.org/packages/PegasusHeavy.DependencyInjector
+      url: https://www.nuget.org/packages/DependencyInjector
 
     steps:
       - name: Download NuGet package
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           name: nuget-package
           path: packages
 
       - name: Setup .NET
-        uses: actions/setup-dotnet@v4
+        uses: actions/setup-dotnet@v5
         with:
           dotnet-version: '8.0.x'
 
@@ -179,25 +191,32 @@ jobs:
     name: Upload to GitHub Release
     needs: build-nuget
     runs-on: ubuntu-latest
+    timeout-minutes: 15
 
     steps:
       - name: Download NuGet package
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           name: nuget-package
           path: packages
 
       - name: Get version
         id: version
+        env:
+          # Interpolated via env rather than directly in the script so
+          # attacker-controllable values cannot inject shell commands.
+          EVENT_NAME: ${{ github.event_name }}
+          INPUT_VERSION: ${{ github.event.inputs.version }}
         run: |
-          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
-            echo "version=${{ github.event.inputs.version }}" >> $GITHUB_OUTPUT
+          if [ "$EVENT_NAME" = "workflow_dispatch" ]; then
+            VERSION="$INPUT_VERSION"
           else
-            echo "version=${GITHUB_REF#refs/tags/}" >> $GITHUB_OUTPUT
+            VERSION="${GITHUB_REF#refs/tags/}"
           fi
+          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
 
       - name: Upload to GitHub Release
-        uses: softprops/action-gh-release@v1
+        uses: softprops/action-gh-release@v3
         with:
           tag_name: ${{ steps.version.outputs.version }}
           files: packages/*.nupkg

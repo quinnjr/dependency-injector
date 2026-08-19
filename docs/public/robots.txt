@@ -1,11 +1,11 @@
 # robots.txt for dependency-injector documentation
-# https://pegasusheavy.github.io/dependency-injector/
+# https://quinnjr.github.io/dependency-injector/
 
 User-agent: *
 Allow: /
 
 # Sitemap location
-Sitemap: https://pegasusheavy.github.io/dependency-injector/sitemap.xml
+Sitemap: https://quinnjr.github.io/dependency-injector/sitemap.xml
 
 # Crawl-delay for respectful crawling
 Crawl-delay: 1

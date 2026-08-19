@@ -372,7 +372,7 @@ build_go() {
 
     print_success "Go module ready"
     echo ""
-    echo "To use: go get github.com/pegasusheavy/dependency-injector/ffi/go/di"
+    echo "To use: go get github.com/quinnjr/dependency-injector/ffi/go/di"
 }
 
 # Build C# package

@@ -41,12 +41,14 @@ package di
 
 #include "dependency_injector.h"
 #include <stdlib.h>
+#include <string.h>
 */
 import "C"
 import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math"
 	"runtime"
 	"unsafe"
 )
@@ -67,6 +69,8 @@ const (
 	InternalError ErrorCode = 4
 	// SerializationError indicates a serialization error occurred.
 	SerializationError ErrorCode = 5
+	// Locked indicates the container is locked and registration is not allowed.
+	Locked ErrorCode = 6
 )
 
 func (e ErrorCode) Error() string {
@@ -83,8 +87,12 @@ func (e ErrorCode) Error() string {
 		return "internal error"
 	case SerializationError:
 		return "serialization error"
+	case Locked:
+		return "container is locked - registration is not allowed"
 	default:
-		return fmt.Sprintf("unknown error code: %d", e)
+		// Codes added by a newer native library must degrade gracefully
+		// rather than panic or be silently reported as a known code.
+		return fmt.Sprintf("unknown error code: %d", int(e))
 	}
 }
 
@@ -259,8 +267,14 @@ func (c *Container) Resolve(typeName string) ([]byte, error) {
 	}
 	defer C.di_string_free(jsonPtr)
 
-	// Copy the string to Go memory
-	return []byte(C.GoString(jsonPtr)), nil
+	// Single copy into Go memory (GoString + []byte conversion would
+	// allocate and copy twice). GoBytes takes a C.int length, so guard
+	// against payloads that would overflow it.
+	n := C.strlen(jsonPtr)
+	if uint64(n) > uint64(math.MaxInt32) {
+		return nil, fmt.Errorf("di: resolved service data too large (%d bytes)", uint64(n))
+	}
+	return C.GoBytes(unsafe.Pointer(jsonPtr), C.int(n)), nil
 }
 
 // ResolveInto retrieves a service and unmarshals it from JSON into the target.
@@ -286,25 +300,151 @@ func (c *Container) TryResolve(typeName string) []byte {
 	return data
 }
 
-// Contains checks if a service is registered.
-func (c *Container) Contains(typeName string) bool {
-	if c.ptr == nil {
-		return false
+// Contains reports whether a service is registered under typeName.
+//
+// The underlying di_contains returns 1 when registered, 0 when not, and -1 on
+// an internal error or invalid argument. The -1 case must not be collapsed
+// into "not registered", so it is surfaced as a non-nil error and the boolean
+// is meaningless in that case.
+func (c *Container) Contains(typeName string) (bool, error) {
+	if c == nil || c.ptr == nil {
+		return false, errors.New("container is nil or freed")
 	}
 
+	clearError()
 	cTypeName := C.CString(typeName)
 	defer C.free(unsafe.Pointer(cTypeName))
 
-	result := C.di_contains(c.ptr, cTypeName)
-	return result == 1
+	switch result := C.di_contains(c.ptr, cTypeName); result {
+	case 1:
+		return true, nil
+	case 0:
+		return false, nil
+	default:
+		return false, &DIError{
+			Code:    InternalError,
+			Message: getLastError(),
+		}
+	}
+}
+
+// Remove removes the service registered under typeName.
+//
+// It reports true when a service was removed and false when no service with
+// that name was registered; neither case is an error. Removal is permitted on
+// a locked container: locking blocks registration only.
+func (c *Container) Remove(typeName string) (bool, error) {
+	if c == nil || c.ptr == nil {
+		return false, errors.New("container is nil or freed")
+	}
+
+	clearError()
+	cTypeName := C.CString(typeName)
+	defer C.free(unsafe.Pointer(cTypeName))
+
+	switch code := ErrorCode(C.di_remove(c.ptr, cTypeName)); code {
+	case OK:
+		return true, nil
+	case NotFound:
+		return false, nil
+	default:
+		return false, &DIError{
+			Code:    code,
+			Message: getLastError(),
+		}
+	}
+}
+
+// Clear removes all registered services from the container.
+//
+// Clearing is permitted on a locked container: locking blocks registration
+// only.
+func (c *Container) Clear() error {
+	if c == nil || c.ptr == nil {
+		return errors.New("container is nil or freed")
+	}
+
+	clearError()
+	if code := ErrorCode(C.di_clear(c.ptr)); code != OK {
+		return &DIError{
+			Code:    code,
+			Message: getLastError(),
+		}
+	}
+	return nil
+}
+
+// Lock locks the container so that no further services can be registered.
+//
+// Locking blocks registration only: after Lock, Register, RegisterJSON and
+// RegisterValue fail with a *DIError whose Code is Locked, while Remove and
+// Clear remain permitted. There is no unlock, and child scopes created with
+// Scope start unlocked regardless of this container's lock state.
+func (c *Container) Lock() error {
+	if c == nil || c.ptr == nil {
+		return errors.New("container is nil or freed")
+	}
+
+	clearError()
+	C.di_lock(c.ptr)
+	// di_lock returns void and reports failure (including a caught panic)
+	// only through the thread-local last error.
+	if msg := getLastError(); msg != "" {
+		return &DIError{
+			Code:    InternalError,
+			Message: msg,
+		}
+	}
+	return nil
+}
+
+// IsLocked reports whether the container has been locked with Lock.
+//
+// The underlying di_is_locked returns 1 when locked, 0 when not, and -1 on an
+// internal error or invalid argument. The -1 case must not be collapsed into
+// "not locked", so it is surfaced as a non-nil error and the boolean is
+// meaningless in that case.
+func (c *Container) IsLocked() (bool, error) {
+	if c == nil || c.ptr == nil {
+		return false, errors.New("container is nil or freed")
+	}
+
+	clearError()
+	switch result := C.di_is_locked(c.ptr); result {
+	case 1:
+		return true, nil
+	case 0:
+		return false, nil
+	default:
+		return false, &DIError{
+			Code:    InternalError,
+			Message: getLastError(),
+		}
+	}
 }
 
 // ServiceCount returns the number of registered services.
-func (c *Container) ServiceCount() int64 {
-	if c.ptr == nil {
-		return -1
+//
+// The native library returns -1 to signal an error (a null container or a
+// panic caught at the FFI boundary); that sentinel is surfaced as an error
+// rather than returned as a count.
+func (c *Container) ServiceCount() (int64, error) {
+	if c == nil || c.ptr == nil {
+		return 0, &DIError{
+			Code:    InvalidArgument,
+			Message: "container is nil or freed",
+		}
 	}
-	return int64(C.di_service_count(c.ptr))
+
+	clearError()
+	count := int64(C.di_service_count(c.ptr))
+	if count < 0 {
+		return 0, &DIError{
+			Code:    InternalError,
+			Message: getLastError(),
+		}
+	}
+	return count, nil
 }
 
 // Version returns the library version.
@@ -317,3 +457,8 @@ var ErrNotFound = &DIError{Code: NotFound}
 
 // ErrAlreadyRegistered is a sentinel error for duplicate registrations.
 var ErrAlreadyRegistered = &DIError{Code: AlreadyRegistered}
+
+// ErrLocked is a sentinel error for registrations attempted on a locked
+// container. Match it with errors.Is against the error returned by Register,
+// RegisterJSON or RegisterValue.
+var ErrLocked = &DIError{Code: Locked}

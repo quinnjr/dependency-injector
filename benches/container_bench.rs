@@ -323,7 +323,9 @@ fn bench_perfect_hash(c: &mut Criterion) {
     });
     container.singleton(ServiceA { value: 1 });
     container.singleton(ServiceB { name: "b".into() });
-    container.singleton(ServiceC { data: vec![1, 2, 3] });
+    container.singleton(ServiceC {
+        data: vec![1, 2, 3],
+    });
     container.singleton(ServiceD { flag: true });
 
     // Freeze the container to get perfect hash storage

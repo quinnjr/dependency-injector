@@ -2,7 +2,7 @@
 
 [![Crates.io](https://img.shields.io/crates/v/dependency-injector.svg)](https://crates.io/crates/dependency-injector)
 [![Documentation](https://docs.rs/dependency-injector/badge.svg)](https://docs.rs/dependency-injector)
-[![CI](https://github.com/pegasusheavy/dependency-injector/actions/workflows/ci.yml/badge.svg)](https://github.com/pegasusheavy/dependency-injector/actions/workflows/ci.yml)
+[![CI](https://github.com/quinnjr/dependency-injector/actions/workflows/ci.yml/badge.svg)](https://github.com/quinnjr/dependency-injector/actions/workflows/ci.yml)
 [![License](https://img.shields.io/crates/l/dependency-injector.svg)](LICENSE)
 
 A high-performance, lock-free dependency injection container for Rust.
@@ -22,14 +22,14 @@ Add to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-dependency-injector = "0.2"
+dependency-injector = "2"
 ```
 
 ### Optional Features
 
 ```toml
 [dependencies]
-dependency-injector = { version = "0.2", features = ["logging-json"] }
+dependency-injector = { version = "2", features = ["logging-json"] }
 ```
 
 | Feature | Description |
@@ -205,15 +205,16 @@ fn main() {
 | `#[inject(optional)]` | `Option<Arc<T>>` | Optional dependency - `None` if not registered |
 | (none) | Any type with `Default` | Uses `Default::default()` |
 
+See also the [compile-time typed builder guide](https://quinnjr.github.io/dependency-injector/docs/guide) on the docs site for fully compile-time-checked registration with `TypedBuilder`.
+
 ## Framework Integration
 
 ### With Armature
 
-[Armature](https://github.com/pegasusheavy/armature) is a Rust HTTP framework with built-in DI support:
+[Armature](https://github.com/quinnjr/armature) is a Rust HTTP framework with built-in DI support:
 
 ```rust
 use armature::prelude::*;
-use dependency_injector::Container;
 
 #[injectable]
 #[derive(Clone)]
@@ -224,15 +225,6 @@ struct UserController {
     db: Arc<Database>,
 }
 
-#[controller]
-impl UserController {
-    #[get("/users")]
-    async fn get_users(&self) -> Result<Json<Vec<User>>, Error> {
-        let users = self.db.query_users().await?;
-        Ok(Json(users))
-    }
-}
-
 #[module]
 struct AppModule {
     #[controllers]
@@ -240,14 +232,11 @@ struct AppModule {
     #[providers]
     providers: (Database,),
 }
-
-#[tokio::main]
-async fn main() -> Result<(), Error> {
-    Application::create(AppModule)
-        .listen("0.0.0.0:3000")
-        .await
-}
 ```
+
+> **Note**: This snippet is illustrative only. The full, working example lives in — and is
+> maintained and tested by — the [Armature repository](https://github.com/quinnjr/armature);
+> it is not compiled as part of this crate.
 
 ## API Reference
 
@@ -264,9 +253,9 @@ async fn main() -> Result<(), Error> {
 
 ## Documentation
 
-- 📚 **[Full Documentation](https://pegasusheavy.github.io/dependency-injector/)** - Comprehensive guides and API reference
+- 📚 **[Full Documentation](https://quinnjr.github.io/dependency-injector/)** - Comprehensive guides and API reference
 - 📖 **[docs.rs](https://docs.rs/dependency-injector)** - API documentation
-- 📊 **[Benchmarks](https://pegasusheavy.github.io/dependency-injector/benchmarks)** - Performance metrics
+- 📊 **[Benchmarks](https://quinnjr.github.io/dependency-injector/benchmarks)** - Performance metrics
 
 ## Logging
 
@@ -370,7 +359,7 @@ The library provides C-compatible FFI bindings for use from other languages:
 |----------|----------|---------|
 | **Go** | Native CGO | `ffi/go/` |
 | **Python** | ctypes | `ffi/python/` |
-| **Node.js** | ffi-napi | `ffi/nodejs/` |
+| **Node.js** | koffi | `ffi/nodejs/` |
 | **C#** | P/Invoke | `ffi/csharp/` |
 | **C/C++** | Header file | `ffi/dependency_injector.h` |
 
@@ -392,10 +381,12 @@ cargo rustc --release --features ffi --crate-type cdylib
 from dependency_injector import Container
 
 container = Container()
-container.singleton("config", {"database": "postgres://localhost"})
+container.register("Config", {"database": "postgres://localhost"})
 
-config = container.get("config")
-print(config)  # {"database": "postgres://localhost"}
+config = container.resolve("Config")
+print(config)  # {'database': 'postgres://localhost'}
+
+container.free()
 ```
 
 ### Quick Example (Go)
@@ -403,16 +394,20 @@ print(config)  # {"database": "postgres://localhost"}
 ```go
 package main
 
-import "github.com/pegasusheavy/dependency-injector/ffi/go/di"
+import (
+    "fmt"
+
+    "github.com/quinnjr/dependency-injector/ffi/go/di"
+)
 
 func main() {
     container := di.NewContainer()
     defer container.Free()
 
-    container.RegisterSingleton("config", `{"database": "postgres://localhost"}`)
+    container.RegisterJSON("Config", `{"database": "postgres://localhost"}`)
 
-    config, _ := container.Resolve("config")
-    fmt.Println(config)
+    config, _ := container.Resolve("Config")
+    fmt.Println(string(config))
 }
 ```
 

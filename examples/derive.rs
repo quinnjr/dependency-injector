@@ -75,7 +75,8 @@ fn main() {
 
     // Create UserService using derive macro
     println!("Creating UserService from container...");
-    let user_service = UserService::from_container(&container).expect("Failed to create UserService");
+    let user_service =
+        UserService::from_container(&container).expect("Failed to create UserService");
 
     println!("  {}", user_service.describe());
     println!();
@@ -102,4 +103,3 @@ fn main() {
     println!("  - Uses Option<Arc<T>> for #[inject(optional)] fields");
     println!("  - Uses Default::default() for non-injected fields");
 }
-

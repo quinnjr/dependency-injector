@@ -1,4 +1,4 @@
-# @pegasusheavy/dependency-injector
+# dependency-injector
 
 Node.js/TypeScript bindings for the high-performance Rust dependency injection container.
 
@@ -15,7 +15,7 @@ Node.js/TypeScript bindings for the high-performance Rust dependency injection c
 ## Installation
 
 ```bash
-pnpm add @pegasusheavy/dependency-injector
+pnpm add dependency-injector
 ```
 
 The package automatically downloads pre-built native libraries for:
@@ -35,7 +35,7 @@ If pre-built binaries aren't available for your platform, or you want to build f
 curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
 
 # Clone and build
-git clone https://github.com/pegasusheavy/dependency-injector
+git clone https://github.com/quinnjr/dependency-injector
 cd dependency-injector
 cargo rustc --release --features ffi --crate-type cdylib
 
@@ -49,12 +49,30 @@ export DI_LIBRARY_PATH=$(pwd)/target/release/libdependency_injector.so
 |----------|-------------|
 | `DI_LIBRARY_PATH` | Custom path to native library |
 | `DI_SKIP_DOWNLOAD` | Skip automatic download (for CI/offline) |
-| `DI_GITHUB_TOKEN` | GitHub token for rate limiting |
+| `DI_GITHUB_TOKEN` | GitHub token for rate limiting and private-repo access. When set, assets are fetched through the `api.github.com` asset endpoint so the token authenticates the download; it is re-evaluated per redirect hop and is never sent to download hosts (e.g. `objects.githubusercontent.com`) |
+| `DI_REQUIRE_CHECKSUM` | When set (non-empty), a release with no `SHA256SUMS` asset is a hard failure (exit 1) instead of a warning |
+
+### Install Failure Policy
+
+The postinstall script distinguishes availability problems (soft) from
+integrity problems (hard):
+
+| Situation | Behaviour |
+|-----------|-----------|
+| Release metadata fetch fails, platform asset missing from the release, or the download fails | Warn, print build-from-source instructions, **exit 0** so the install completes |
+| Checksum mismatch, `SHA256SUMS` present but with no entry for the asset, or an existing `SHA256SUMS` asset cannot be fetched | **Exit 1**; the downloaded file is deleted |
+| Release has no `SHA256SUMS` asset at all (pre-checksum release) | Warn and proceed — unless `DI_REQUIRE_CHECKSUM` is set, then **exit 1** |
+| Unsupported platform | **Exit 1** |
+
+Downloads are staged at `<output>.download.<pid>` and only renamed into place after
+the checksum verifies, so the library path never holds an unverified file. A
+soft failure means no native library was installed — `require`/`import` of the
+package will fail until one is built or fetched.
 
 ## Quick Start
 
 ```typescript
-import { Container } from '@pegasusheavy/dependency-injector';
+import { Container } from 'dependency-injector';
 
 // Define your service interfaces
 interface Config {
@@ -108,6 +126,46 @@ requestScope.free();
 root.free();
 ```
 
+## Removal and Locking
+
+Services can be removed individually or all at once, and a container can be
+sealed once wiring is complete:
+
+```typescript
+const container = new Container();
+container.register('Config', { env: 'production' });
+container.register('Cache', { ttl: 60 });
+
+// Remove one service - false means "there was nothing to remove"
+container.remove('Cache');   // true
+container.remove('Cache');   // false
+
+// Seal the container: no further registrations
+container.lock();
+container.isLocked();        // true
+
+try {
+  container.register('Late', {});
+} catch (error) {
+  if (error instanceof DIError) {
+    console.log(error.code === ErrorCode.Locked); // true
+  }
+}
+
+// Locking blocks registration only
+container.resolve('Config'); // still works
+container.remove('Config');  // still works
+container.clear();           // still works
+
+// Child scopes start unlocked, even from a locked parent
+const child = container.scope();
+child.isLocked();            // false
+child.register('Request', { id: 'req-1' }); // allowed
+
+child.free();
+container.free();
+```
+
 ## API Reference
 
 ### `Container`
@@ -122,10 +180,34 @@ Register a singleton service. The value is JSON-serialized.
 Resolve a service. The value is JSON-deserialized.
 
 #### `container.contains(typeName: string): boolean`
-Check if a service is registered.
+Check if a service is registered. Returns `true`/`false`; a native failure
+throws rather than reporting `false` (see
+[Error signalling](#error-signalling)).
+
+#### `container.remove(typeName: string): boolean`
+Remove a registered service. Returns `true` if it was removed, `false` if no
+service with that name was registered. Any other native failure throws.
+Permitted on a locked container.
+
+#### `container.clear(): void`
+Remove all registered services from this container. Permitted on a locked
+container. Child scopes already created keep their own snapshot and are
+unaffected.
+
+#### `container.lock(): void`
+Lock the container so no further services can be registered. Locking blocks
+**registration only** — `remove()`, `clear()` and `resolve()` all keep working.
+There is no unlock, and child scopes created with `scope()` start unlocked.
+After locking, `register()` throws a `DIError` with `code === ErrorCode.Locked`.
+
+#### `container.isLocked(): boolean`
+Check whether the container is locked. A native failure throws rather than
+reporting `false` (see [Error signalling](#error-signalling)).
 
 #### `container.scope(): Container`
-Create a child scope that inherits parent services.
+Create a child scope that inherits parent services. Inheritance is a snapshot
+taken at creation time, and the child starts unlocked regardless of the
+parent's lock state.
 
 #### `container.serviceCount: number`
 Get the number of registered services.
@@ -141,7 +223,7 @@ Get the library version.
 Error class thrown by the container.
 
 ```typescript
-import { DIError, ErrorCode } from '@pegasusheavy/dependency-injector';
+import { DIError, ErrorCode } from 'dependency-injector';
 
 try {
   container.resolve('NonExistent');
@@ -163,8 +245,42 @@ enum ErrorCode {
   AlreadyRegistered = 3,
   InternalError = 4,
   SerializationError = 5,
+  Locked = 6, // Container is locked - registration is not allowed
 }
 ```
+
+An error code the native library returns but this build does not know about
+(for example a newer library adding a code) produces a `DIError` carrying that
+raw code and the message `Unknown error code: <n>`.
+
+### Error signalling
+
+The native ABI reports the boolean-ish predicates `di_contains` and
+`di_is_locked` as an `int32_t`: `1` for true, `0` for false, and **`-1` for
+"an error occurred"** — an internal error or an invalid argument, with the
+detail available from `di_error_message()`.
+
+`-1` is *not* false. Collapsing it would report an internal failure as a
+confident "the service is not registered" / "the container is not locked", so
+this binding throws a `DIError` (`ErrorCode.InternalError`, carrying the native
+message) instead:
+
+```typescript
+try {
+  if (container.contains('Config')) {
+    // ...
+  }
+} catch (error) {
+  if (error instanceof DIError) {
+    // A genuine failure, distinct from "not registered".
+    console.error(error.message);
+  }
+}
+```
+
+`remove()` is the one place where a non-`Ok` code is folded into a boolean, and
+only for `NotFound`: "there was nothing to remove" is an outcome, not a
+failure. Every other code throws.
 
 ## Development
 

@@ -1,0 +1,74 @@
+name: Canary
+
+on:
+  schedule:
+    # Run every day at 06:00 UTC
+    - cron: '0 6 * * *'
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+
+permissions:
+  contents: read
+
+jobs:
+  canary:
+    name: Canary Build
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: main
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Run full test suite
+        run: cargo test --all-features
+
+      - name: Build cdylib
+        run: cargo rustc --release --features ffi --crate-type cdylib
+
+  report:
+    name: Report Failure
+    needs: [canary]
+    # cancelled() catches the 30-minute job timeout, which failure() alone misses.
+    if: ${{ failure() || cancelled() }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    # Split out of the build job so cargo test / build scripts / proc macros
+    # never execute with an issue-write token.
+    permissions:
+      contents: read
+      issues: write
+    steps:
+      - name: Report failure as issue
+        # The canary is already red; a broken notifier must not become the
+        # visible cause of the run.
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          set -o pipefail
+          TITLE="Canary failure"
+          BODY="Canary run failed: ${RUN_URL}"
+          # Capture gh's exit status directly. Piping straight into `head -n 1`
+          # would yield head's status (Actions' default `bash -e` has no
+          # pipefail), so an auth/rate-limit failure produced an empty EXISTING
+          # and opened a duplicate issue on every run. Buffering first also
+          # keeps pipefail from tripping on head's SIGPIPE.
+          if ! ISSUES=$(gh issue list --state open --search "\"$TITLE\" in:title" \
+            --json number,title --jq ".[] | select(.title == \"$TITLE\") | .number"); then
+            echo "::warning::gh issue list failed; skipping dedupe"
+            exit 0
+          fi
+          EXISTING=$(printf '%s\n' "$ISSUES" | head -n 1)
+          if [ -n "$EXISTING" ]; then
+            gh issue comment "$EXISTING" --body "$BODY"
+          else
+            gh issue create --title "$TITLE" --body "$BODY"
+          fi

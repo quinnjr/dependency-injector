@@ -132,6 +132,6 @@ echo -e "  dependency-injector-derive v${DERIVE_VERSION}"
 echo -e "  dependency-injector v${MAIN_VERSION}"
 echo ""
 echo -e "Don't forget to:"
-echo -e "  1. Push the tag: ${YELLOW}git push origin v${MAIN_VERSION}${NC}"
+echo -e "  1. Create and push the tag: ${YELLOW}git tag -a v${MAIN_VERSION} -m \"Release v${MAIN_VERSION}\" && git push origin v${MAIN_VERSION}${NC}"
 echo -e "  2. Create GitHub release"
 

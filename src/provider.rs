@@ -3,6 +3,7 @@
 //! These traits define what types can be injected and how they behave.
 
 use std::any::TypeId;
+use std::sync::Arc;
 
 /// Marker trait for types that can be injected via the DI container.
 ///
@@ -72,7 +73,7 @@ pub struct ProviderRegistration {
     /// Human-readable type name
     pub type_name: &'static str,
     /// Registration function
-    pub register_fn: fn(&crate::Container),
+    pub register_fn: Arc<dyn Fn(&crate::Container) + Send + Sync>,
 }
 
 impl ProviderRegistration {
@@ -82,21 +83,21 @@ impl ProviderRegistration {
         Self {
             type_id: TypeId::of::<T>(),
             type_name: std::any::type_name::<T>(),
-            register_fn,
+            register_fn: Arc::new(register_fn),
         }
     }
 
     /// Create from a singleton value
     ///
-    /// Note: This creates a no-op registration. For actual registration,
-    /// use `Container::singleton()` directly.
-    pub fn singleton<T: Injectable + Clone>(_value: T) -> Self {
+    /// The value is captured by the registration, and `register_fn` registers
+    /// a clone of it as a singleton on the container it is given.
+    pub fn singleton<T: Injectable + Clone>(value: T) -> Self {
         Self {
             type_id: TypeId::of::<T>(),
             type_name: std::any::type_name::<T>(),
-            register_fn: |_container| {
-                // No-op: actual registration should use Container::singleton()
-            },
+            register_fn: Arc::new(move |container: &crate::Container| {
+                container.singleton(value.clone());
+            }),
         }
     }
 }
@@ -117,27 +118,54 @@ macro_rules! provider {
         $crate::ProviderRegistration {
             type_id: std::any::TypeId::of::<$type>(),
             type_name: std::any::type_name::<$type>(),
-            register_fn: |container| {
+            register_fn: $crate::Arc::new(|container: &$crate::Container| {
                 container.singleton($factory);
-            },
+            }),
         }
     };
     (lazy $type:ty, $factory:expr) => {
         $crate::ProviderRegistration {
             type_id: std::any::TypeId::of::<$type>(),
             type_name: std::any::type_name::<$type>(),
-            register_fn: |container| {
+            register_fn: $crate::Arc::new(|container: &$crate::Container| {
                 container.lazy($factory);
-            },
+            }),
         }
     };
     (transient $type:ty, $factory:expr) => {
         $crate::ProviderRegistration {
             type_id: std::any::TypeId::of::<$type>(),
             type_name: std::any::type_name::<$type>(),
-            register_fn: |container| {
+            register_fn: $crate::Arc::new(|container: &$crate::Container| {
                 container.transient($factory);
-            },
+            }),
         }
     };
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::Container;
+
+    #[derive(Clone)]
+    struct TestService {
+        value: String,
+    }
+
+    #[test]
+    fn test_singleton_registration_registers_value() {
+        let registration = ProviderRegistration::singleton(TestService {
+            value: "provided".into(),
+        });
+
+        assert_eq!(registration.type_id, TypeId::of::<TestService>());
+
+        // Applying the registration actually registers the captured value
+        let container = Container::new();
+        (registration.register_fn)(&container);
+
+        let service = container.get::<TestService>().unwrap();
+        assert_eq!(service.value, "provided");
+    }
 }

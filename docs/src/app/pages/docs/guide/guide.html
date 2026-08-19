@@ -41,6 +41,58 @@
       </p>
       <app-code-block filename="overrides.rs" [code]="overrideCode" />
 
+      <h2 id="compile-time-safety"><fa-icon [icon]="['fas', 'cubes']" class="mr-2"></fa-icon>Compile-Time Safety</h2>
+      <p>
+        Beyond the dynamic <code>Container</code>, dependency-injector ships two compile-time
+        layers: the <strong>typed builder</strong>, which records registrations in the type
+        system, and <strong>verified services</strong>, which declare their dependencies
+        through a trait so the container can resolve and wire them for you.
+      </p>
+
+      <h3 id="typed-builder">TypedBuilder &amp; TypedContainer</h3>
+      <p>
+        <code>TypedBuilder</code> tracks every registration in its type parameter. Calling
+        <code>build()</code> locks the container against further registrations and returns a
+        <code>TypedContainer</code> whose <code>get()</code> returns <code>Arc&lt;T&gt;</code>
+        directly &mdash; no <code>Result</code> handling for services you registered.
+        <code>try_get()</code> and <code>contains()</code> remain available for defensive
+        code paths, and <code>scope()</code> still hands out dynamic child containers.
+      </p>
+      <app-code-block filename="typed_builder.rs" [code]="typedBuilderCode" />
+
+      <h3 id="verified-services">Verified Services</h3>
+      <p>
+        Implement the <code>Service</code> trait to declare a service's dependencies and
+        construction logic. <code>Dependencies</code> can be any <code>Resolvable</code>
+        type: <code>()</code> for none, <code>Arc&lt;T&gt;</code> for one,
+        <code>Option&lt;Arc&lt;T&gt;&gt;</code> for an optional service, or tuples of up to
+        12 elements that freely mix required and optional entries. The
+        <code>ServiceProvider</code> extension trait on <code>Container</code> then registers
+        services with <code>provide()</code> (lazy singleton),
+        <code>provide_singleton()</code> (eager &mdash; returns <code>false</code> when a
+        required dependency is missing), or <code>provide_transient()</code> (new instance
+        per resolve).
+      </p>
+      <app-code-block filename="verified.rs" [code]="verifiedServiceCode" />
+
+      <h3 id="service-modules">Service Modules</h3>
+      <p>
+        Group related registrations behind a <code>ServiceModule</code> so an entire
+        subsystem can be installed with a single call.
+      </p>
+      <app-code-block filename="modules.rs" [code]="serviceModuleCode" />
+
+      <h3 id="typed-require">Require &amp; TypedRequire</h3>
+      <p>
+        The <code>Require</code> trait declares a service's dependencies as a type-level
+        <code>Reg</code> list that mirrors the typed builder's registry type, so a missing
+        or misordered registration becomes a compile error instead of a runtime panic.
+        With the <code>derive</code> feature enabled, <code>#[derive(TypedRequire)]</code>
+        generates the impl from <code>#[dep]</code> field attributes;
+        <code>#[dep(optional)]</code> fields are excluded from the required list.
+      </p>
+      <app-code-block filename="typed_require.rs" [code]="typedRequireCode" />
+
       <h2 id="thread-safety"><fa-icon [icon]="['fas', 'shield']" class="mr-2"></fa-icon>Thread Safety</h2>
       <p>
         Dependency Injector is designed to be fully thread-safe. All containers can be safely
@@ -56,14 +108,26 @@
         </p>
       </div>
 
+      <h3 id="performance-tools">Performance Tools</h3>
+      <ul class="feature-list">
+        <li><strong><code>ScopePool</code></strong> - Pre-allocates reusable request scopes; <code>acquire()</code> hands out a scope that is cleared and returned to the pool when dropped (~20ns per reuse vs ~134ns for a fresh scope)</li>
+        <li><strong><code>warm_cache::&lt;T&gt;()</code> / <code>clear_cache()</code></strong> - Pre-populate or release the thread-local hot cache for services resolved on the hot path</li>
+        <li><strong><code>lock()</code> / <code>freeze()</code></strong> - <code>lock()</code> forbids registrations after startup; with the <code>perfect-hash</code> feature, <code>freeze()</code> additionally snapshots the container into a <code>FrozenStorage</code> backed by a minimal perfect hash function for collision-free O(1) lookups</li>
+      </ul>
+
       <h2 id="error-handling"><fa-icon [icon]="['fas', 'exclamation-triangle']" class="mr-2"></fa-icon>Error Handling</h2>
       <p>
         Service resolution returns a <code>Result</code> type. The main error cases are:
       </p>
       <ul class="feature-list">
         <li><code>DiError::NotFound</code> - Service type not registered in container or parent scopes</li>
-        <li><code>DiError::FactoryPanicked</code> - Factory function panicked during creation</li>
+        <li><code>DiError::CircularDependency</code> - Circular dependency detected during resolution</li>
+        <li><code>DiError::CreationFailed</code> - Factory reported a failure while creating the service</li>
       </ul>
+      <p>
+        Note that factory panics are not caught by the container — a panicking factory
+        propagates the panic to the caller rather than returning an error.
+      </p>
 
       <div class="nav-cards">
         <a routerLink="/docs/api" class="nav-card">

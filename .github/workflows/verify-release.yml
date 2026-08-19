@@ -1,0 +1,158 @@
+name: Verify Release
+
+on:
+  workflow_run:
+    workflows: ["Release"]
+    types: [completed]
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version to verify (e.g., 2.0.0, without the v prefix)'
+        required: true
+
+permissions:
+  contents: read
+
+jobs:
+  resolve:
+    name: Resolve Version
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    if: github.event_name == 'workflow_dispatch' || github.event.workflow_run.conclusion == 'success'
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+    steps:
+      - name: Determine version
+        id: version
+        env:
+          # Interpolated via env rather than directly in the script so
+          # attacker-controllable values cannot inject shell commands.
+          EVENT_NAME: ${{ github.event_name }}
+          INPUT_VERSION: ${{ github.event.inputs.version }}
+          HEAD_BRANCH: ${{ github.event.workflow_run.head_branch }}
+        run: |
+          if [ "$EVENT_NAME" = "workflow_dispatch" ]; then
+            VERSION="$INPUT_VERSION"
+          else
+            # The Release workflow runs on tag pushes, so head_branch holds
+            # the tag name (e.g. v2.0.0).
+            VERSION="$HEAD_BRANCH"
+          fi
+          VERSION="${VERSION#v}"
+          # Bash's =~ anchors against the whole string; `grep -E '^...$'` anchors
+          # per LINE, so a multi-line workflow_dispatch input would pass on its
+          # first line and smuggle the rest downstream. The leading `v` has
+          # already been stripped above, so the pattern must not re-allow it.
+          # The optional suffix accepts prerelease tags (v2.1.0-rc.1), which the
+          # Release workflow's `v[0-9]+.*` trigger already publishes.
+          if ! [[ "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$ ]]; then
+            echo "::error::Invalid or missing release version: '${VERSION}'"
+            exit 1
+          fi
+          echo "Verifying release v${VERSION}"
+          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
+
+  crate-verify:
+    name: Verify crates.io Install
+    needs: resolve
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Build scratch project against published crate
+        env:
+          # Interpolated via env rather than directly in the script so
+          # attacker-controllable values cannot inject shell commands.
+          VERSION: ${{ needs.resolve.outputs.version }}
+        run: |
+          cargo new verify-install
+          cd verify-install
+
+          # Retry to allow for crates.io index propagation after publish
+          for attempt in 1 2 3 4 5; do
+            if cargo add "dependency-injector@${VERSION}"; then
+              break
+            fi
+            if [ "$attempt" = "5" ]; then
+              echo "::error::dependency-injector v${VERSION} not found on crates.io after 5 attempts"
+              exit 1
+            fi
+            echo "Attempt ${attempt} failed, waiting 60s for crates.io to index..."
+            sleep 60
+          done
+
+          cargo build
+
+  assets-verify:
+    name: Verify Release Assets
+    needs: resolve
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Check native assets on GitHub release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+          VERSION: ${{ needs.resolve.outputs.version }}
+        run: |
+          EXPECTED="libdependency_injector-linux-x64.so libdependency_injector-linux-arm64.so libdependency_injector-darwin-x64.dylib libdependency_injector-darwin-arm64.dylib dependency_injector-win32-x64.dll"
+
+          # Retry: the Build Native Libraries workflow uploads assets in
+          # parallel with the Release workflow and may still be running.
+          for attempt in $(seq 1 10); do
+            ASSETS=$(gh release view "v${VERSION}" --json assets --jq '.assets[].name' || true)
+            MISSING=""
+            for asset in $EXPECTED; do
+              if ! echo "$ASSETS" | grep -qx "$asset"; then
+                MISSING="$MISSING $asset"
+              fi
+            done
+            if [ -z "$MISSING" ]; then
+              echo "All expected native assets are present on release v${VERSION}:"
+              echo "$ASSETS"
+              exit 0
+            fi
+            echo "Attempt ${attempt}: still missing:${MISSING}"
+            if [ "$attempt" -lt 10 ]; then
+              sleep 60
+            fi
+          done
+
+          echo "Release v${VERSION} assets found:"
+          echo "$ASSETS"
+          echo "::error::Missing expected native assets on release v${VERSION}:${MISSING}"
+          exit 1
+
+      - name: Verify asset checksums
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+          VERSION: ${{ needs.resolve.outputs.version }}
+        run: |
+          # End-to-end integrity check: download the published checksum
+          # manifest plus one representative asset and verify it matches.
+          #
+          # Releases cut before SHA256SUMS existed have no manifest. Probe for
+          # it explicitly rather than letting `gh release download` exit 0 on a
+          # partial pattern match and sha256sum then die with an opaque "No such
+          # file or directory". Deliberate choice: warn and proceed, matching the
+          # warn-and-proceed policy the installers document for the same case.
+          # Capture gh's own exit status (not grep's) so an API/auth failure is
+          # reported as an error instead of being mistaken for "no manifest".
+          if ! RELEASE_ASSETS=$(gh release view "v${VERSION}" --json assets --jq '.assets[].name'); then
+            echo "::error::Could not list assets for release v${VERSION}"
+            exit 1
+          fi
+          if ! printf '%s\n' "$RELEASE_ASSETS" | grep -qx 'SHA256SUMS'; then
+            echo "::warning::Release v${VERSION} has no SHA256SUMS asset (predates checksum publishing); skipping checksum verification"
+            exit 0
+          fi
+
+          mkdir -p checksum-verify
+          cd checksum-verify
+          gh release download "v${VERSION}" \
+            --pattern 'SHA256SUMS' \
+            --pattern 'libdependency_injector-linux-x64.so'
+          sha256sum --check --ignore-missing SHA256SUMS

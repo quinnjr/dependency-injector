@@ -19,7 +19,7 @@ import (
 	"fmt"
 	"log"
 
-	"github.com/pegasusheavy/dependency-injector/ffi/go/di"
+	"github.com/quinnjr/dependency-injector/ffi/go/di"
 )
 
 // Config represents application configuration.
@@ -86,10 +86,18 @@ func main() {
 
 	// === Check Container State ===
 	fmt.Println("\n--- Container State ---")
-	fmt.Printf("Service count: %d\n", container.ServiceCount())
-	fmt.Printf("Contains 'Config': %v\n", container.Contains("Config"))
-	fmt.Printf("Contains 'DatabaseService': %v\n", container.Contains("DatabaseService"))
-	fmt.Printf("Contains 'NonExistent': %v\n", container.Contains("NonExistent"))
+	serviceCount, err := container.ServiceCount()
+	if err != nil {
+		log.Fatalf("Failed to read service count: %v", err)
+	}
+	fmt.Printf("Service count: %d\n", serviceCount)
+	for _, name := range []string{"Config", "DatabaseService", "NonExistent"} {
+		present, err := container.Contains(name)
+		if err != nil {
+			log.Fatalf("Failed to check for %q: %v", name, err)
+		}
+		fmt.Printf("Contains %q: %v\n", name, present)
+	}
 
 	// === Resolve Services ===
 	fmt.Println("\n--- Resolving Services ---")
@@ -157,7 +165,11 @@ func main() {
 	fmt.Printf("✓ Resolved CurrentUser: %s <%s>\n", resolvedUser.Name, resolvedUser.Email)
 
 	// Parent cannot access scoped services
-	if container.Contains("CurrentUser") {
+	parentHasUser, err := container.Contains("CurrentUser")
+	if err != nil {
+		log.Fatalf("Failed to check parent for CurrentUser: %v", err)
+	}
+	if parentHasUser {
 		log.Fatal("Parent should not contain CurrentUser!")
 	}
 	fmt.Println("✓ Parent container correctly doesn't see CurrentUser")

@@ -1,28 +1,37 @@
 <!doctype html>
 <html lang="en">
 <head>
+<!-- Google tag (gtag.js) -->
+<script async src="https://www.googletagmanager.com/gtag/js?id=G-E6DWG27SVR"></script>
+<script>
+  window.dataLayer = window.dataLayer || [];
+  function gtag(){dataLayer.push(arguments);}
+  gtag('js', new Date());
+
+  gtag('config', 'G-E6DWG27SVR');
+</script>
   <meta charset="utf-8">
   <title>Dependency Injector - High-Performance DI for Rust, Go, Node.js, Python & C#</title>
   <meta name="viewport" content="width=device-width, initial-scale=1">
 
   <!-- Primary Meta Tags -->
   <meta name="title" content="Dependency Injector - High-Performance DI for Rust, Go, Node.js, Python & C#">
-  <meta name="description" content="A lightning-fast, lock-free dependency injection container for Rust with FFI bindings for Go, Node.js, Python, and C#. ~9ns singleton resolution, type-safe, zero-config, thread-safe. Built for modern concurrent applications.">
+  <meta name="description" content="A lightning-fast, lock-free dependency injection container for Rust with FFI bindings for Go, Node.js, Python, and C#. Sub-20ns cached singleton resolution, type-safe, zero-config, thread-safe. Built for modern concurrent applications.">
   <meta name="keywords" content="rust dependency injection, di container, ioc container, rust di, go dependency injection, nodejs di, python di, csharp di, ffi bindings, lock-free, thread-safe, high-performance, service locator, inversion of control, rust library, cross-language di">
-  <meta name="author" content="Pegasus Heavy Industries">
+  <meta name="author" content="Joseph R. Quinn">
   <meta name="robots" content="index, follow">
   <meta name="language" content="English">
   <meta name="revisit-after" content="7 days">
 
   <!-- Canonical URL -->
-  <link rel="canonical" href="https://pegasusheavy.github.io/dependency-injector/">
+  <link rel="canonical" href="https://quinnjr.github.io/dependency-injector/">
 
   <!-- Open Graph / Facebook -->
   <meta property="og:type" content="website">
-  <meta property="og:url" content="https://pegasusheavy.github.io/dependency-injector/">
+  <meta property="og:url" content="https://quinnjr.github.io/dependency-injector/">
   <meta property="og:title" content="Dependency Injector - High-Performance DI for Rust, Go, Node.js, Python & C#">
-  <meta property="og:description" content="Lightning-fast dependency injection with ~9ns resolution. Cross-language FFI bindings for Go, Node.js, Python, and C#. Lock-free, thread-safe, type-safe.">
-  <meta property="og:image" content="https://pegasusheavy.github.io/dependency-injector/og-image.png">
+  <meta property="og:description" content="Lightning-fast dependency injection with sub-20ns cached resolution. Cross-language FFI bindings for Go, Node.js, Python, and C#. Lock-free, thread-safe, type-safe.">
+  <meta property="og:image" content="https://quinnjr.github.io/dependency-injector/og-image.png">
   <meta property="og:image:width" content="1200">
   <meta property="og:image:height" content="630">
   <meta property="og:site_name" content="Dependency Injector">
@@ -30,11 +39,10 @@
 
   <!-- Twitter -->
   <meta name="twitter:card" content="summary_large_image">
-  <meta name="twitter:url" content="https://pegasusheavy.github.io/dependency-injector/">
+  <meta name="twitter:url" content="https://quinnjr.github.io/dependency-injector/">
   <meta name="twitter:title" content="Dependency Injector - High-Performance DI for Rust, Go, Node.js, Python & C#">
-  <meta name="twitter:description" content="Lightning-fast dependency injection with ~9ns resolution. Cross-language FFI bindings for Go, Node.js, Python, and C#. Lock-free, thread-safe, type-safe.">
-  <meta name="twitter:image" content="https://pegasusheavy.github.io/dependency-injector/og-image.png">
-  <meta name="twitter:creator" content="@PegasusHeavy">
+  <meta name="twitter:description" content="Lightning-fast dependency injection with sub-20ns cached resolution. Cross-language FFI bindings for Go, Node.js, Python, and C#. Lock-free, thread-safe, type-safe.">
+  <meta name="twitter:image" content="https://quinnjr.github.io/dependency-injector/og-image.png">
 
   <!-- Favicons -->
   <link rel="icon" type="image/x-icon" href="favicon.ico">
@@ -65,19 +73,19 @@
     "@type": "SoftwareSourceCode",
     "name": "dependency-injector",
     "description": "High-performance, lock-free dependency injection container for Rust with FFI bindings for Go, Node.js, Python, and C#",
-    "url": "https://pegasusheavy.github.io/dependency-injector/",
-    "codeRepository": "https://github.com/pegasusheavy/dependency-injector",
+    "url": "https://quinnjr.github.io/dependency-injector/",
+    "codeRepository": "https://github.com/quinnjr/dependency-injector",
     "programmingLanguage": ["Rust", "Go", "TypeScript", "Python", "C#"],
     "runtimePlatform": ["Rust", "Go", "Node.js", "Python", ".NET"],
     "license": "https://opensource.org/licenses/MIT",
     "author": {
       "@type": "Organization",
-      "name": "Pegasus Heavy Industries",
-      "url": "https://github.com/pegasusheavy"
+      "name": "Joseph R. Quinn",
+      "url": "https://github.com/quinnjr"
     },
     "maintainer": {
       "@type": "Organization",
-      "name": "Pegasus Heavy Industries"
+      "name": "Joseph R. Quinn"
     },
     "keywords": [
       "dependency injection",
@@ -104,12 +112,11 @@
   {
     "@context": "https://schema.org",
     "@type": "Organization",
-    "name": "Pegasus Heavy Industries",
-    "url": "https://github.com/pegasusheavy",
-    "logo": "https://pegasusheavy.github.io/dependency-injector/android-chrome-512x512.png",
+    "name": "Joseph R. Quinn",
+    "url": "https://github.com/quinnjr",
+    "logo": "https://quinnjr.github.io/dependency-injector/android-chrome-512x512.png",
     "sameAs": [
-      "https://github.com/pegasusheavy",
-      "https://www.patreon.com/c/PegasusHeavyIndustries"
+      "https://github.com/quinnjr"
     ]
   }
   </script>
@@ -125,7 +132,7 @@
         "name": "What is dependency-injector?",
         "acceptedAnswer": {
           "@type": "Answer",
-          "text": "dependency-injector is a high-performance, lock-free dependency injection container for Rust. It achieves ~9ns singleton resolution times and provides type-safe, zero-config dependency management for modern concurrent applications."
+          "text": "dependency-injector is a high-performance, lock-free dependency injection container for Rust. It achieves sub-20ns cached singleton resolution times and provides type-safe, zero-config dependency management for modern concurrent applications."
         }
       },
       {
@@ -165,7 +172,7 @@
         "name": "How do I install dependency-injector?",
         "acceptedAnswer": {
           "@type": "Answer",
-          "text": "For Rust: Add `dependency-injector = \"0.2\"` to Cargo.toml. For other languages, build the Rust library with `cargo rustc --release --features ffi --crate-type cdylib` and use the respective language bindings (Go: go get, Node.js: pnpm add, Python: pip install, C#: dotnet add)."
+          "text": "For Rust: Add `dependency-injector = \"2\"` to Cargo.toml. For other languages, build the Rust library with `cargo rustc --release --features ffi --crate-type cdylib` and use the respective language bindings (Go: go get, Node.js: pnpm add, Python: pip install, C#: dotnet add)."
         }
       }
     ]
@@ -183,7 +190,7 @@
       {
         "@type": "HowToStep",
         "name": "Add to Cargo.toml",
-        "text": "Add dependency-injector = \"0.2\" to your Cargo.toml dependencies section"
+        "text": "Add dependency-injector = \"2\" to your Cargo.toml dependencies section"
       },
       {
         "@type": "HowToStep",

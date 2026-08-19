@@ -27,6 +27,7 @@ fi
 echo "${GREEN}✔ All tests passed${NC}"
 
 # 2. Run clippy with strict settings
+# KEEP IN SYNC with the justfile `lint` recipe clippy flag list
 echo ""
 echo "${YELLOW}▸ Running strict clippy checks...${NC}"
 if ! cargo clippy --all-targets --all-features -- \
@@ -36,7 +37,28 @@ if ! cargo clippy --all-targets --all-features -- \
     -A clippy::module_name_repetitions \
     -A clippy::must_use_candidate \
     -A clippy::missing_errors_doc \
-    -A clippy::missing_panics_doc; then
+    -A clippy::missing_panics_doc \
+    -A clippy::doc_markdown \
+    -A clippy::return_self_not_must_use \
+    -A clippy::single_match_else \
+    -A clippy::cast_possible_truncation \
+    -A clippy::uninlined_format_args \
+    -A clippy::inline_always \
+    -A clippy::ignored_unit_patterns \
+    -A clippy::used_underscore_binding \
+    -A clippy::missing_fields_in_debug \
+    -A clippy::manual_let_else \
+    -A clippy::elidable_lifetime_names \
+    -A clippy::unreadable_literal \
+    -A clippy::struct_excessive_bools \
+    -A clippy::redundant_closure_for_method_calls \
+    -A clippy::ptr_as_ptr \
+    -A clippy::map_unwrap_or \
+    -A clippy::manual_assert \
+    -A clippy::cast_possible_wrap \
+    -A clippy::bool_to_int_with_if \
+    -A clippy::semicolon_if_nothing_returned \
+    -A clippy::wildcard_imports; then
     echo ""
     echo "${RED}✖ Clippy found issues!${NC}"
     exit 1

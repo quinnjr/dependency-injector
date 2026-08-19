@@ -98,10 +98,25 @@ public class BenchmarkResult
 
 public static class Benchmark
 {
+    // When DI_BENCH_SMOKE is set to a non-empty value, every benchmark runs a
+    // token number of iterations. The resulting timings are meaningless as
+    // measurements -- the point is to execute every code path cheaply so CI can
+    // catch crashes, build errors and API drift without spending minutes.
+    private static readonly bool Smoke =
+        !string.IsNullOrEmpty(Environment.GetEnvironmentVariable("DI_BENCH_SMOKE"));
+    private const int SmokeIterations = 2;
+    private const int SmokeWarmup = 1;
+
     public static BenchmarkResult Run(string name, Action action, int iterations = 100000)
     {
+        var warmup = Smoke ? SmokeWarmup : 1000;
+        if (Smoke)
+        {
+            iterations = SmokeIterations;
+        }
+
         // Warm up
-        for (int i = 0; i < 1000; i++)
+        for (int i = 0; i < warmup; i++)
         {
             action();
         }
@@ -315,8 +330,10 @@ public class Program
         Console.WriteLine("============================\n");
 
         Console.WriteLine("For comparison with Rust dependency-injector:");
-        Console.WriteLine("- Rust singleton resolution: ~17-32 ns");
-        Console.WriteLine("- Rust mixed workload (100 ops): ~2.2 µs");
+        Console.WriteLine("- Rust singleton resolution: ~9.30 ns");
+        Console.WriteLine("- Rust mixed workload (100 ops): ~1.60 µs");
+        Console.WriteLine("  (measured on the machine described in BENCHMARK_COMPARISON.md,");
+        Console.WriteLine("   not re-measured live here)");
         Console.WriteLine();
         Console.WriteLine("Best C# times from this benchmark:");
         Console.WriteLine($"- Singleton resolution: {singletonResults[0].AvgNs:F0} ns (manual_di)");

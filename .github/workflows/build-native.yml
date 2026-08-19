@@ -7,7 +7,7 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: 'Version tag (e.g., v0.2.2)'
+        description: 'Version tag (e.g., v2.0.0)'
         required: true
 
 permissions:
@@ -35,7 +35,7 @@ jobs:
             cross: true
 
           # macOS x64 (Intel)
-          - os: macos-13
+          - os: macos-15-intel
             target: x86_64-apple-darwin
             artifact: libdependency_injector.dylib
             asset_name: libdependency_injector-darwin-x64.dylib
@@ -54,10 +54,10 @@ jobs:
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
 
       - name: Install Rust
-        uses: dtolnay/rust-action@stable
+        uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.target }}
 
@@ -83,7 +83,7 @@ jobs:
           copy target\${{ matrix.target }}\release\${{ matrix.artifact }} ${{ matrix.asset_name }}
 
       - name: Upload artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: ${{ matrix.asset_name }}
           path: ${{ matrix.asset_name }}
@@ -94,32 +94,43 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
 
       - name: Download all artifacts
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           path: artifacts
 
       - name: Prepare release assets
         run: |
           mkdir -p release
-          find artifacts -type f -name "*.so" -o -name "*.dylib" -o -name "*.dll" | while read f; do
+          find artifacts -type f \( -name "*.so" -o -name "*.dylib" -o -name "*.dll" \) | while read f; do
             cp "$f" release/
           done
           ls -la release/
 
+      - name: Generate SHA256SUMS
+        run: |
+          (cd release && sha256sum * > SHA256SUMS)
+          cat release/SHA256SUMS
+
       - name: Get version
         id: version
+        env:
+          # Interpolated via env rather than directly in the script so
+          # attacker-controllable values cannot inject shell commands.
+          EVENT_NAME: ${{ github.event_name }}
+          INPUT_VERSION: ${{ github.event.inputs.version }}
         run: |
-          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
-            echo "version=${{ github.event.inputs.version }}" >> $GITHUB_OUTPUT
+          if [ "$EVENT_NAME" = "workflow_dispatch" ]; then
+            VERSION="$INPUT_VERSION"
           else
-            echo "version=${GITHUB_REF#refs/tags/}" >> $GITHUB_OUTPUT
+            VERSION="${GITHUB_REF#refs/tags/}"
           fi
+          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
 
       - name: Create or update release
-        uses: softprops/action-gh-release@v1
+        uses: softprops/action-gh-release@v3
         with:
           tag_name: ${{ steps.version.outputs.version }}
           name: Release ${{ steps.version.outputs.version }}

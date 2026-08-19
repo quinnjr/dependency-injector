@@ -106,6 +106,7 @@ ${BOLD}WORKFLOW:${NC}
     6. Creates git tag
     7. Pushes to origin
     8. Publishes to crates.io
+    9. Builds FFI artifacts
 
 EOF
     exit 0
@@ -297,6 +298,16 @@ update_version() {
 
     cd "$PROJECT_ROOT"
 
+    if [[ "$DRY_RUN" == "true" ]]; then
+        print_warning "DRY RUN: Would update version in Cargo.toml to $VERSION"
+        if [[ "$SKIP_DERIVE" != "true" ]]; then
+            print_warning "DRY RUN: Would update dependency-injector-derive/Cargo.toml to $VERSION"
+            print_warning "DRY RUN: Would update derive dependency reference in Cargo.toml to $VERSION"
+        fi
+        print_warning "DRY RUN: Would update Cargo.lock (cargo update -p dependency-injector)"
+        return
+    fi
+
     # Update main crate version
     print_step "Updating dependency-injector to $VERSION..."
     sed -i "s/^version = \"[^\"]*\"/version = \"$VERSION\"/" Cargo.toml
@@ -329,6 +340,11 @@ update_changelog() {
     # Check if version already exists in changelog
     if grep -q "## \[$VERSION\]" "$changelog"; then
         print_success "Version $VERSION already in CHANGELOG.md"
+        return
+    fi
+
+    if [[ "$DRY_RUN" == "true" ]]; then
+        print_warning "DRY RUN: Would add version $VERSION ($today) entry to CHANGELOG.md"
         return
     fi
 
@@ -506,7 +522,7 @@ print_summary() {
         echo "Links:"
         echo "  • https://crates.io/crates/dependency-injector"
         echo "  • https://docs.rs/dependency-injector"
-        echo "  • https://github.com/pegasusheavy/dependency-injector/releases/tag/v$VERSION"
+        echo "  • https://github.com/quinnjr/dependency-injector/releases/tag/v$VERSION"
     fi
     echo ""
 }

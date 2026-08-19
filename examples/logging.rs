@@ -103,4 +103,3 @@ fn main() {
     println!("\nTip: Use --features logging-json for production (JSON output)");
     println!("     Use --features logging-pretty for development (colorful output)");
 }
-

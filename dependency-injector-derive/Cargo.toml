@@ -1,11 +1,11 @@
 [package]
 name = "dependency-injector-derive"
-version = "0.1.0"
+version = "2.1.0"
 edition = "2024"
 rust-version = "1.85"
 description = "Derive macros for dependency-injector"
 license = "MIT OR Apache-2.0"
-repository = "https://github.com/pegasusheavy/dependency-injector"
+repository = "https://github.com/quinnjr/dependency-injector"
 documentation = "https://docs.rs/dependency-injector-derive"
 readme = "README.md"
 keywords = ["dependency-injection", "di", "derive", "macro", "proc-macro"]

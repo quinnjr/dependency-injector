@@ -10,6 +10,22 @@ use ahash::RandomState;
 use dashmap::DashMap;
 use std::any::{Any, TypeId};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
+
+/// Global source of unique cache generations.
+///
+/// Every storage starts with a fresh generation and is stamped with a new
+/// one on every mutation (insert/clear/remove). Because generations are
+/// globally unique, a hot cache entry stamped with an old generation can
+/// never be mistaken for current — even if a freed storage's address is
+/// reused by a new storage (ABA).
+static NEXT_GENERATION: AtomicU64 = AtomicU64::new(0);
+
+/// Get a fresh, globally unique generation value.
+#[inline]
+fn next_generation() -> u64 {
+    NEXT_GENERATION.fetch_add(1, Ordering::Relaxed)
+}
 
 #[cfg(feature = "perfect-hash")]
 use std::hash::{Hash, Hasher};
@@ -69,6 +85,11 @@ pub struct ServiceStorage {
     factories: DashMap<TypeId, AnyFactory, RandomState>,
     /// Optional parent storage for hierarchical resolution
     parent: Option<Arc<ServiceStorage>>,
+    /// Cache generation — stamped with a globally unique value on every
+    /// mutation so thread-local hot-cache entries from before the mutation
+    /// can be detected as stale. Stamping happens inside `insert`/`clear`/
+    /// `remove`, the only mutators, so no caller can forget to invalidate.
+    generation: AtomicU64,
 }
 
 impl ServiceStorage {
@@ -89,6 +110,7 @@ impl ServiceStorage {
                 8, // 8 shards balances creation speed vs concurrency
             ),
             parent: None,
+            generation: AtomicU64::new(next_generation()),
         }
     }
 
@@ -110,6 +132,7 @@ impl ServiceStorage {
                 shard_amount,
             ),
             parent: None,
+            generation: AtomicU64::new(next_generation()),
         }
     }
 
@@ -127,6 +150,7 @@ impl ServiceStorage {
                 4, // 4 shards for child scopes (typically <5 services)
             ),
             parent: Some(parent),
+            generation: AtomicU64::new(next_generation()),
         }
     }
 
@@ -134,6 +158,11 @@ impl ServiceStorage {
     #[inline]
     pub(crate) fn insert(&self, type_id: TypeId, factory: AnyFactory) {
         self.factories.insert(type_id, factory);
+        // Release pairs with the Acquire in `generation()`: a reader that
+        // observes the new generation also observes the map mutation, keeping
+        // the invalidation protocol self-contained (no reliance on DashMap's
+        // internal shard locks for ordering).
+        self.generation.store(next_generation(), Ordering::Release);
     }
 
     /// Check if type exists
@@ -230,12 +259,9 @@ impl ServiceStorage {
     #[inline]
     pub fn child(self: &Arc<Self>) -> Self {
         Self {
-            factories: DashMap::with_capacity_and_hasher_and_shard_amount(
-                0,
-                RandomState::new(),
-                8,
-            ),
+            factories: DashMap::with_capacity_and_hasher_and_shard_amount(0, RandomState::new(), 8),
             parent: Some(Arc::clone(self)),
+            generation: AtomicU64::new(next_generation()),
         }
     }
 
@@ -255,6 +281,8 @@ impl ServiceStorage {
     #[inline]
     pub fn clear(&self) {
         self.factories.clear();
+        // Release: see `insert`.
+        self.generation.store(next_generation(), Ordering::Release);
     }
 
     /// Check if this storage has a parent
@@ -266,7 +294,12 @@ impl ServiceStorage {
     /// Remove a service
     #[inline]
     pub fn remove(&self, type_id: &TypeId) -> bool {
-        self.factories.remove(type_id).is_some()
+        let removed = self.factories.remove(type_id).is_some();
+        if removed {
+            // Release: see `insert`.
+            self.generation.store(next_generation(), Ordering::Release);
+        }
+        removed
     }
 
     /// Get all registered type IDs
@@ -281,6 +314,19 @@ impl ServiceStorage {
             .get(type_id)
             .map(|f| f.is_transient())
             .unwrap_or(false)
+    }
+
+    /// Current cache generation of this storage.
+    ///
+    /// Changes on every mutation; hot-cache entries stamped with an older
+    /// generation are stale.
+    #[inline]
+    pub(crate) fn generation(&self) -> u64 {
+        // Acquire pairs with the Release stores in insert/clear/remove.
+        // NOTE: `Container::get` must load this BEFORE reading the factories
+        // map so that an entry cached under this generation can never contain
+        // data newer than the generation claims.
+        self.generation.load(Ordering::Acquire)
     }
 }
 
@@ -353,12 +399,16 @@ impl FrozenStorage {
                 mphf: boomphf::Mphf::new(1.7, &[]),
                 factories: Vec::new(),
                 type_ids: Vec::new(),
-                parent: storage.parent.as_ref().map(|p| Arc::new(Self::from_storage(p))),
+                parent: storage
+                    .parent
+                    .as_ref()
+                    .map(|p| Arc::new(Self::from_storage(p))),
             };
         }
 
         // Create hashable type IDs for MPHF
-        let hashable_ids: Vec<HashableTypeId> = entries.iter().map(|(id, _)| HashableTypeId(*id)).collect();
+        let hashable_ids: Vec<HashableTypeId> =
+            entries.iter().map(|(id, _)| HashableTypeId(*id)).collect();
 
         // Create MPHF with gamma=1.7 (good balance of speed vs memory)
         let mphf = boomphf::Mphf::new(1.7, &hashable_ids);
@@ -378,7 +428,10 @@ impl FrozenStorage {
         let type_ids: Vec<TypeId> = indexed_type_ids.into_iter().flatten().collect();
 
         // Freeze parent if it exists
-        let parent = storage.parent.as_ref().map(|p| Arc::new(Self::from_storage(p)));
+        let parent = storage
+            .parent
+            .as_ref()
+            .map(|p| Arc::new(Self::from_storage(p)));
 
         Self {
             mphf,
@@ -510,9 +563,15 @@ mod tests {
     #[test]
     fn test_frozen_storage() {
         let storage = ServiceStorage::new();
-        storage.insert(TypeId::of::<TestService>(), AnyFactory::singleton(TestService { value: 42 }));
+        storage.insert(
+            TypeId::of::<TestService>(),
+            AnyFactory::singleton(TestService { value: 42 }),
+        );
         storage.insert(TypeId::of::<i32>(), AnyFactory::singleton(123i32));
-        storage.insert(TypeId::of::<String>(), AnyFactory::singleton("hello".to_string()));
+        storage.insert(
+            TypeId::of::<String>(),
+            AnyFactory::singleton("hello".to_string()),
+        );
 
         let frozen = FrozenStorage::from_storage(&storage);
 

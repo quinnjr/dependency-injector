@@ -13,6 +13,7 @@
 //! - ♻️ **Transient services** - Fresh instance on every resolve
 //! - 🧵 **Thread-local cache** - Hot path optimization for frequently accessed services
 //! - 📊 **Observable** - Optional tracing integration with JSON or pretty output
+//! - ⏳ **Async singletons** - Optional `async` feature adds `lazy_async`/`get_async` (tokio)
 //!
 //! ## Quick Start
 //!
@@ -103,6 +104,8 @@
 //! - **Thread-local cache**: Avoid map lookups for hot services
 //! - **Zero allocation resolve**: Returns `Arc<T>` directly, no cloning
 
+#[cfg(feature = "async")]
+pub mod async_support;
 mod container;
 mod error;
 mod factory;
@@ -141,13 +144,18 @@ pub use std::sync::Arc;
 pub mod prelude {
     pub use crate::{
         BatchBuilder, BatchRegistrar, Container, DiError, Factory, Injectable, Lifetime,
-        PooledScope, Provider, Result, Scope, ScopedContainer, ScopePool,
+        PooledScope, Provider, Result, Scope, ScopePool, ScopedContainer,
     };
     pub use std::sync::Arc;
 
     // Compile-time safety types
-    pub use crate::typed::{TypedBuilder, TypedContainer, Has, HasType, HasService, DeclaresDeps, Reg, DepsPresent};
-    pub use crate::verified::{Service, ServiceProvider, ServiceModule, Resolvable};
+    pub use crate::typed::{
+        DeclaresDeps, DepsPresent, Has, HasService, HasType, Reg, TypedBuilder, TypedContainer,
+    };
+    pub use crate::verified::{Resolvable, Service, ServiceModule, ServiceProvider};
+
+    #[cfg(feature = "async")]
+    pub use crate::async_support::AsyncLazy;
 
     #[cfg(feature = "derive")]
     pub use crate::{Inject, Service as ServiceDerive, TypedRequire};

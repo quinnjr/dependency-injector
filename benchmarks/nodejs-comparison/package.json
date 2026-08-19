@@ -8,7 +8,7 @@
     "build": "tsc"
   },
   "keywords": ["benchmark", "di", "dependency-injection"],
-  "author": "Pegasus Heavy Industries",
+  "author": "Joseph R. Quinn",
   "license": "MIT",
   "packageManager": "pnpm@10.26.2",
   "devDependencies": {

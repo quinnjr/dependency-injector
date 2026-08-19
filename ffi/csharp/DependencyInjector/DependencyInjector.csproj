@@ -7,13 +7,13 @@
     <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
 
     <!-- Package metadata -->
-    <PackageId>PegasusHeavy.DependencyInjector</PackageId>
-    <Version>0.2.2</Version>
-    <Authors>Pegasus Heavy Industries</Authors>
+    <PackageId>DependencyInjector</PackageId>
+    <Version>2.1.0</Version>
+    <Authors>Joseph R. Quinn</Authors>
     <Description>C# bindings for the high-performance Rust dependency injection container. Native libraries bundled for Linux, macOS, and Windows.</Description>
     <PackageLicenseExpression>MIT OR Apache-2.0</PackageLicenseExpression>
-    <PackageProjectUrl>https://github.com/pegasusheavy/dependency-injector</PackageProjectUrl>
-    <RepositoryUrl>https://github.com/pegasusheavy/dependency-injector</RepositoryUrl>
+    <PackageProjectUrl>https://github.com/quinnjr/dependency-injector</PackageProjectUrl>
+    <RepositoryUrl>https://github.com/quinnjr/dependency-injector</RepositoryUrl>
     <PackageTags>dependency-injection;di;ioc;container;rust;ffi;native</PackageTags>
     <PackageReadmeFile>README.md</PackageReadmeFile>
 
