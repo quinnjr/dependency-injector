@@ -28,7 +28,7 @@ fn next_generation() -> u64 {
 }
 
 #[cfg(feature = "perfect-hash")]
-use std::hash::{Hash, Hasher};
+use std::hash::Hash;
 
 // =============================================================================
 // Unchecked Downcast (Phase 8 optimization)
@@ -350,18 +350,8 @@ impl std::fmt::Debug for ServiceStorage {
 
 /// Wrapper for TypeId that implements Hash trait for boomphf
 #[cfg(feature = "perfect-hash")]
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 struct HashableTypeId(TypeId);
-
-#[cfg(feature = "perfect-hash")]
-impl Hash for HashableTypeId {
-    fn hash<H: Hasher>(&self, state: &mut H) {
-        // TypeId is already a hash, just pass it through
-        // Use the debug representation to get the internal value
-        let type_id_bits: u64 = unsafe { std::mem::transmute_copy(&self.0) };
-        type_id_bits.hash(state);
-    }
-}
 
 /// Frozen storage with perfect hashing for O(1) lookups.
 ///

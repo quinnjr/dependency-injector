@@ -25,11 +25,11 @@ const HOT_CACHE_SLOTS: usize = 4;
 
 /// A cached service entry
 ///
-/// Phase 13 optimization: Stores pre-computed u64 hash instead of TypeId
-/// to avoid transmute on every comparison.
+/// The full `TypeId` is stored and compared exactly: slot collisions are
+/// expected, so this check is what guarantees the unchecked downcast is sound.
 struct CacheEntry {
-    /// Pre-computed hash of TypeId (avoids transmute on lookup)
-    type_hash: u64,
+    /// Exact type of the cached service
+    type_id: TypeId,
     /// Pointer to the storage this was resolved from (for scope identity)
     storage_ptr: usize,
     /// Storage generation at the time of caching (for staleness detection).
@@ -57,24 +57,23 @@ impl HotCache {
 
     /// Get a cached service if present for a specific container
     ///
-    /// Phase 12+13 optimization: Uses UnsafeCell (no RefCell borrow check)
-    /// and pre-computed type_hash (no transmute on lookup).
+    /// Phase 12 optimization: Uses UnsafeCell (no RefCell borrow check).
     ///
     /// The entry only hits if its generation matches the storage's current
     /// generation, so entries cached before a mutation are never returned.
     #[inline(always)]
     fn get<T: Send + Sync + 'static>(&self, storage_ptr: usize, generation: u64) -> Option<Arc<T>> {
-        let type_hash = Self::type_hash::<T>();
-        let slot = Self::slot_for_hash(type_hash, storage_ptr);
+        let type_id = TypeId::of::<T>();
+        let slot = Self::slot_for::<T>(storage_ptr);
 
         if let Some(entry) = &self.entries[slot] {
-            // Phase 13: Compare u64 hash directly (faster than TypeId comparison)
-            if entry.type_hash == type_hash
+            if entry.type_id == type_id
                 && entry.storage_ptr == storage_ptr
                 && entry.generation == generation
             {
-                // Cache hit - clone and downcast (unchecked since type_hash matches)
-                // SAFETY: We verified type_hash matches, so the Arc contains type T
+                // Cache hit - clone and downcast (unchecked since TypeId matches)
+                // SAFETY: entry.type_id == TypeId::of::<T>() and entries are only
+                // inserted with the TypeId of the Arc they hold, so it contains T.
                 let arc = entry.service.clone();
                 return Some(unsafe { downcast_arc_unchecked(arc) });
             }
@@ -85,11 +84,10 @@ impl HotCache {
     /// Insert a service into the cache for a specific container
     #[inline]
     fn insert<T: Injectable>(&mut self, storage_ptr: usize, generation: u64, service: Arc<T>) {
-        let type_hash = Self::type_hash::<T>();
-        let slot = Self::slot_for_hash(type_hash, storage_ptr);
+        let slot = Self::slot_for::<T>(storage_ptr);
 
         self.entries[slot] = Some(CacheEntry {
-            type_hash,
+            type_id: TypeId::of::<T>(),
             storage_ptr,
             generation,
             service: service as Arc<dyn Any + Send + Sync>,
@@ -102,19 +100,25 @@ impl HotCache {
         self.entries = [const { None }; HOT_CACHE_SLOTS];
     }
 
-    /// Extract u64 hash from TypeId (computed once per type at compile time via monomorphization)
+    /// Hash a TypeId for slot selection only (never used as a type check).
+    ///
+    /// Goes through `TypeId: Hash` because `TypeId`'s layout is unspecified.
     #[inline(always)]
     fn type_hash<T: 'static>() -> u64 {
-        let type_id = TypeId::of::<T>();
-        // SAFETY: TypeId is #[repr(transparent)] wrapper around u128
-        unsafe { std::mem::transmute_copy(&type_id) }
+        ahash::RandomState::with_seeds(
+            0x243f_6a88_85a3_08d3,
+            0x1319_8a2e_0370_7344,
+            0xa409_3822_299f_31d0,
+            0x082e_fa98_ec4e_6c89,
+        )
+        .hash_one(TypeId::of::<T>())
     }
 
-    /// Calculate slot index from pre-computed type hash and storage pointer
+    /// Calculate slot index for type `T` in a given storage
     #[inline(always)]
-    fn slot_for_hash(type_hash: u64, storage_ptr: usize) -> usize {
+    fn slot_for<T: 'static>(storage_ptr: usize) -> usize {
         // Fast bit mixing: XOR with rotated storage_ptr for good distribution
-        let mixed = type_hash ^ (storage_ptr as u64).rotate_left(32);
+        let mixed = Self::type_hash::<T>() ^ (storage_ptr as u64).rotate_left(32);
 
         // Use golden ratio multiplication for final mixing (fast & good distribution)
         let slot = mixed.wrapping_mul(0x9e3779b97f4a7c15);
@@ -1411,6 +1415,24 @@ mod tests {
     #[derive(Clone)]
     struct AnotherService {
         name: String,
+    }
+
+    #[test]
+    fn test_hot_cache_rejects_wrong_type_in_colliding_slot() {
+        let storage_ptr = 0x1000;
+        let generation = 7;
+        let mut cache = HotCache::new();
+        cache.insert(storage_ptr, generation, Arc::new(42u64));
+
+        // Simulate a slot collision: put the u64 entry where u32 would look.
+        let from = HotCache::slot_for::<u64>(storage_ptr);
+        let to = HotCache::slot_for::<u32>(storage_ptr);
+        let entry = cache.entries[from].take();
+        cache.entries[to] = entry;
+
+        assert!(cache.get::<u32>(storage_ptr, generation).is_none());
+        cache.entries.swap(from, to);
+        assert_eq!(*cache.get::<u64>(storage_ptr, generation).unwrap(), 42);
     }
 
     #[test]
