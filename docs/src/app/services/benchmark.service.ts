@@ -222,7 +222,7 @@ export class BenchmarkService {
               { name: 'transient/get_transient', value: 24.0, unit: 'ns/iter', range: '± 0.5' },
               // Scoped benchmarks (Phase 11: 4-shard DashMap for child scopes)
               { name: 'scoped/create_scope', value: 80, unit: 'ns/iter', range: '± 3' },
-              { name: 'scoped/scope_pool_acquire', value: 56, unit: 'ns/iter', range: '± 2' },
+              { name: 'scoped/scope_pool_acquire', value: 68, unit: 'ns/iter', range: '± 3' },
               { name: 'scoped/resolve_from_parent', value: 9.0, unit: 'ns/iter', range: '± 0.2' },
               { name: 'scoped/deep_parent_chain', value: 18.0, unit: 'ns/iter', range: '± 0.4' },
               { name: 'scoped/resolve_override', value: 9.0, unit: 'ns/iter', range: '± 0.2' },

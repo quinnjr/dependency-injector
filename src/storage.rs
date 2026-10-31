@@ -478,7 +478,21 @@ impl FrozenStorage {
     ///
     /// This computes a minimal perfect hash function for all registered TypeIds,
     /// enabling O(1) lookups without hash collisions.
-    pub(crate) fn from_storage(storage: &Arc<ServiceStorage>) -> Self {
+    #[deprecated(note = "use `Container::freeze`")]
+    #[must_use]
+    pub fn from_storage(storage: &ServiceStorage) -> Self {
+        // Without the storage's `Arc` its transient factories cannot be kept
+        // working after it is dropped; `Container::freeze` handles that.
+        Self::build(storage, None)
+    }
+
+    /// Freeze `storage`, keeping it alive if it holds transient factories
+    /// (see `_source`). Used by `Container::freeze`.
+    pub(crate) fn freeze(storage: &Arc<ServiceStorage>) -> Self {
+        Self::build(storage, Some(storage))
+    }
+
+    fn build(storage: &ServiceStorage, pin: Option<&Arc<ServiceStorage>>) -> Self {
         // Clone under the iterator's shard guards (cheap, no user code), then
         // initialize lazy services once the guards are gone, so the frozen
         // storage is a snapshot and no initializer runs under a lock.
@@ -491,10 +505,8 @@ impl FrozenStorage {
             .into_iter()
             .map(|(type_id, factory)| (type_id, factory.into_initialized()))
             .collect();
-        let source = entries
-            .iter()
-            .any(|(_, factory)| factory.is_transient())
-            .then(|| Arc::clone(storage));
+        let source = pin.filter(|_| entries.iter().any(|(_, factory)| factory.is_transient()));
+        let source = source.map(Arc::clone);
 
         let n = entries.len();
         if n == 0 {
@@ -503,10 +515,7 @@ impl FrozenStorage {
                 mphf: boomphf::Mphf::new(1.7, &[]),
                 factories: Vec::new(),
                 type_ids: Vec::new(),
-                parent: storage
-                    .parent
-                    .as_ref()
-                    .map(|p| Arc::new(Self::from_storage(p))),
+                parent: storage.parent.as_ref().map(|p| Arc::new(Self::freeze(p))),
             };
         }
 
@@ -532,10 +541,7 @@ impl FrozenStorage {
         let type_ids: Vec<TypeId> = indexed_type_ids.into_iter().flatten().collect();
 
         // Freeze parent if it exists
-        let parent = storage
-            .parent
-            .as_ref()
-            .map(|p| Arc::new(Self::from_storage(p)));
+        let parent = storage.parent.as_ref().map(|p| Arc::new(Self::freeze(p)));
 
         Self {
             _source: source,
@@ -678,7 +684,7 @@ mod tests {
             AnyFactory::singleton("hello".to_string()),
         );
 
-        let frozen = FrozenStorage::from_storage(&storage);
+        let frozen = FrozenStorage::freeze(&storage);
 
         // Test contains
         assert!(frozen.contains(&TypeId::of::<TestService>()));
@@ -699,11 +705,22 @@ mod tests {
     #[test]
     fn test_frozen_storage_empty() {
         let storage = Arc::new(ServiceStorage::new());
-        let frozen = FrozenStorage::from_storage(&storage);
+        let frozen = FrozenStorage::freeze(&storage);
 
         assert!(frozen.is_empty());
         assert_eq!(frozen.len(), 0);
         assert!(!frozen.contains(&TypeId::of::<TestService>()));
+    }
+
+    #[cfg(feature = "perfect-hash")]
+    #[test]
+    #[allow(deprecated)]
+    fn test_deprecated_from_storage_still_freezes() {
+        let storage = ServiceStorage::new();
+        storage.insert(TypeId::of::<i32>(), AnyFactory::singleton(7i32));
+        let frozen = FrozenStorage::from_storage(&storage);
+        let value = frozen.resolve(&TypeId::of::<i32>()).unwrap();
+        assert_eq!(*value.downcast::<i32>().unwrap(), 7);
     }
 
     #[test]

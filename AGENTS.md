@@ -9,7 +9,10 @@ they install into `.git/hooks/` on the first `cargo test`).
 - Cargo workspace with two crates: `dependency-injector` (root) and
   `dependency-injector-derive` ([dependency-injector-derive/](dependency-injector-derive/));
   versions kept in lockstep. The `fuzz/` crate is excluded from the workspace on purpose.
-- **MSRV: Rust 1.85**, edition 2024. CI checks against 1.85.0 — do not use newer features.
+- **MSRV: Rust 1.85**, edition 2024. CI checks the library against 1.85.0
+  (`cargo +1.85 check --all-features`) — do not use newer features. Dev-dependencies
+  such as criterion may need a newer toolchain, so `cargo +1.85 test` is not expected
+  to build.
 - High-performance library: hot paths (`get()`, `contains()`, `try_get()`) target
   sub-10ns resolution. Use `#[inline]` on small hot methods, `Arc<T>` for sharing,
   `DashMap` (never `RwLock<HashMap>`). Every `unsafe` block needs a `// SAFETY:` comment.

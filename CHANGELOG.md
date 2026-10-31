@@ -68,10 +68,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   shard write locks were held, so a `Drop` that touched the same container
   deadlocked. Services are now dropped after the locks are released.
 
-### Changed
-- `FrozenStorage::from_storage` is now crate-private. It took the internal
-  `ServiceStorage` type, so it was not callable from outside the crate; use
-  `Container::freeze`.
+### Deprecated
+- `FrozenStorage::from_storage` is deprecated in favour of
+  `Container::freeze`, which keeps frozen transient factories working after
+  the container is dropped.
 
 ## [2.1.0] - 2026-07-27
 

@@ -182,8 +182,8 @@ fn cache_get<T: Injectable>(storage_ptr: usize, generation: u64) -> Option<Arc<T
         .try_with(|cell| {
             // SAFETY: the thread-local is only accessed from this thread, and
             // no `&mut` to it is live: the mutable borrows in `cache_service`,
-            // `cache_clear` and `cache_evict_storage` end before any user code
-            // can run. `get` only
+            // `cache_clear` and `cache_evict_storage_slow` end before any user
+            // code can run. `get` only
             // clones an Arc, so no user code runs during this borrow either.
             let cache = unsafe { &*cell.get() };
             cache.get::<T>(storage_ptr, generation)
@@ -223,16 +223,36 @@ fn cache_clear() {
 
 /// Drop the calling thread's hot-cache entries for one storage, after the
 /// cache borrow ends.
+///
+/// Dropping an evicted service may resolve (and so re-cache) another service
+/// of the same storage, so the slow path evicts twice; whatever its second
+/// pass's drops cache in turn is left to the caller (`ScopePool::release`
+/// then sees the storage as shared and discards it).
 #[inline]
 fn cache_evict_storage(storage_ptr: usize) {
-    let evicted = HOT_CACHE.try_with(|cell| {
-        // SAFETY: as in `cache_service`; this only reads and moves entries.
-        let cache = unsafe { &mut *cell.get() };
-        // Usually nothing matches; skip building the evicted array then.
-        let any_cached = (cache.entries.iter().flatten()).any(|e| e.storage_ptr == storage_ptr);
-        any_cached.then(|| cache.evict_storage(storage_ptr))
+    let any_cached = HOT_CACHE.try_with(|cell| {
+        // SAFETY: as in `cache_get`; this only reads the entries.
+        let cache = unsafe { &*cell.get() };
+        (cache.entries.iter().flatten()).any(|e| e.storage_ptr == storage_ptr)
     });
-    drop(evicted);
+    // Usually nothing matches; keep the eviction itself out of line.
+    if any_cached == Ok(true) {
+        cache_evict_storage_slow(storage_ptr);
+    }
+}
+
+#[cold]
+#[inline(never)]
+fn cache_evict_storage_slow(storage_ptr: usize) {
+    for _ in 0..2 {
+        let evicted = HOT_CACHE.try_with(|cell| {
+            // SAFETY: as in `cache_service`; `evict_storage` only moves
+            // entries, which are dropped after this borrow ends.
+            let cache = unsafe { &mut *cell.get() };
+            cache.evict_storage(storage_ptr)
+        });
+        drop(evicted);
+    }
 }
 
 /// How many extra clears `ScopePool::release` attempts when services' `Drop`
@@ -1015,7 +1035,7 @@ impl Container {
     #[inline]
     pub fn freeze(&self) -> crate::storage::FrozenStorage {
         self.lock();
-        crate::storage::FrozenStorage::from_storage(&self.storage)
+        crate::storage::FrozenStorage::freeze(&self.storage)
     }
 
     /// Create a non-owning handle to this container.
@@ -1728,6 +1748,30 @@ mod tests {
         assert_eq!(resolves_on_drop_drops(), 0);
         Container::new().clear_cache();
         assert_eq!(resolves_on_drop_drops(), 1);
+    }
+
+    #[test]
+    fn test_pool_reuses_scope_when_evicted_drop_recaches_scope_holder() {
+        struct Holder(#[allow(dead_code)] Container);
+        struct ResolvesHolderOnDrop(Container);
+        impl Drop for ResolvesHolderOnDrop {
+            fn drop(&mut self) {
+                // Re-caches Holder (which holds the scope) on this thread.
+                let _ = self.0.get::<Holder>();
+            }
+        }
+
+        let root = Container::new();
+        let pool = ScopePool::new(&root, 1);
+        for _ in 0..3 {
+            let scope = pool.acquire();
+            scope.singleton(Holder(scope.clone()));
+            scope.singleton(ResolvesHolderOnDrop(scope.clone()));
+            let _ = scope.get::<ResolvesHolderOnDrop>().unwrap();
+            // Only the hot cache holds it now; release evicts it.
+            assert!(scope.remove::<ResolvesHolderOnDrop>());
+        }
+        assert_eq!(pool.available_count(), 1);
     }
 
     #[test]
