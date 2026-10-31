@@ -184,7 +184,7 @@ impl ServiceStorage {
     #[inline]
     pub(crate) fn insert(&self, type_id: TypeId, factory: AnyFactory) {
         self.factories.insert(type_id, factory);
-        // Release pairs with the Acquire load in `clear`/`insertions_since`.
+        // Release pairs with the Acquire load in `clear`/`inserted_since`.
         self.insertions.fetch_add(1, Ordering::Release);
         // Release pairs with the Acquire in `generation()`: a reader that
         // observes the new generation also observes the map mutation, keeping
@@ -334,12 +334,14 @@ impl ServiceStorage {
     /// Not atomic with respect to concurrent registration: a service
     /// registered while `clear` runs may survive it.
     ///
-    /// Returns the insertion count observed at the start if nothing was
-    /// registered while `clear` ran (by another thread, or by a service's
-    /// `Drop`), in which case the storage was left empty; `None` otherwise.
-    /// Pass the count to [`Self::inserted_since`] to check later that the
-    /// storage is still empty, which is one atomic load where `is_empty`
-    /// would lock every shard.
+    /// Returns the insertion count observed at the start if no registration
+    /// was observed while `clear` ran (from a service's `Drop` on this thread,
+    /// or completed by another thread), and `None` otherwise. A registration
+    /// through another handle may still land unobserved (its count is bumped
+    /// after the map insert), so callers that need the storage to be empty
+    /// must first ensure exclusive access and then call
+    /// [`Self::inserted_since`] with the count: one atomic load where
+    /// `is_empty` would lock every shard.
     #[inline]
     pub fn clear(&self) -> Option<u64> {
         // Taken before removing anything, so an insertion racing with the

@@ -115,6 +115,20 @@ impl HotCache {
         std::mem::replace(&mut self.entries, [const { None }; HOT_CACHE_SLOTS])
     }
 
+    /// Remove the entries cached for one storage, returning them for the
+    /// caller to drop outside the mutable borrow (see [`HotCache::insert`]).
+    #[inline]
+    #[must_use = "drop the evicted entries outside the hot cache borrow"]
+    fn evict_storage(&mut self, storage_ptr: usize) -> [Option<CacheEntry>; HOT_CACHE_SLOTS] {
+        let mut evicted = [const { None }; HOT_CACHE_SLOTS];
+        for (slot, out) in self.entries.iter_mut().zip(&mut evicted) {
+            if slot.as_ref().is_some_and(|e| e.storage_ptr == storage_ptr) {
+                *out = slot.take();
+            }
+        }
+        evicted
+    }
+
     /// Hash a TypeId for slot selection only (never used as a type check).
     ///
     /// Goes through `TypeId: Hash` because `TypeId`'s layout is unspecified.
@@ -202,6 +216,20 @@ fn cache_clear() {
         // SAFETY: as in `cache_service`; `clear` only moves the entries out.
         let cache = unsafe { &mut *cell.get() };
         cache.clear()
+    });
+    drop(evicted);
+}
+
+/// Drop the calling thread's hot-cache entries for one storage, after the
+/// cache borrow ends.
+#[inline]
+fn cache_evict_storage(storage_ptr: usize) {
+    let evicted = HOT_CACHE.try_with(|cell| {
+        // SAFETY: as in `cache_service`; this only reads and moves entries.
+        let cache = unsafe { &mut *cell.get() };
+        // Usually nothing matches; skip building the evicted array then.
+        let any_cached = (cache.entries.iter().flatten()).any(|e| e.storage_ptr == storage_ptr);
+        any_cached.then(|| cache.evict_storage(storage_ptr))
     });
     drop(evicted);
 }
@@ -1337,7 +1365,9 @@ use std::sync::Mutex;
 /// write to it: if a clone of the scope (or a service holding one) outlives
 /// the request, or services' `Drop` impls keep registering into it, the
 /// scope is discarded instead and the pool shrinks until it creates a new
-/// one. (If `Drop` impls keep re-registering a service that holds the scope
+/// one. Services cached by the releasing thread are evicted first, but ones
+/// cached by other threads that resolved from the scope still count as
+/// holding it. (If `Drop` impls keep re-registering a service that holds the scope
 /// itself beyond a few clears, the discarded scope leaks through that
 /// cycle.)
 ///
@@ -1345,7 +1375,8 @@ use std::sync::Mutex;
 ///
 /// - First acquisition: ~134ns (creates new scope if pool is empty)
 /// - Subsequent acquisitions: ~20ns (reuses pooled scope)
-/// - Release: ~10ns (clears and returns to pool)
+/// - Release: ~15-20ns (clears, verifies the scope is unshared, and returns
+///   it to the pool)
 pub struct ScopePool {
     /// Parent storage to create scopes from
     parent_storage: Arc<ServiceStorage>,
@@ -1475,6 +1506,11 @@ impl ScopePool {
             locked,
             ..
         } = container;
+        // Services this thread resolved from the scope are still held by its
+        // hot cache, possibly with clones of the scope; drop them first (their
+        // `Drop` may still write to the scope, which the clear below handles)
+        // so they do not keep the scope from being reused.
+        cache_evict_storage(Arc::as_ptr(&storage) as usize);
         // Clear storage for reuse (parent reference is preserved). The clear
         // stamps a fresh generation, invalidating hot cache entries for this
         // scope (including lingering clones of the container). A service's
@@ -1898,10 +1934,28 @@ mod tests {
             let _ = scope.get::<RegistersOnDrop>().unwrap();
         }
         let scope = pool.acquire();
-        // Evicting the cached service runs its Drop, which writes to the
-        // released scope; that must not be the scope serving this request.
+        // Release evicts the cached service, whose Drop writes Marker into
+        // the released scope; release must clear that before any reuse, and
+        // no later eviction may write into the scope serving this request.
         scope.clear_cache();
         assert!(!scope.contains::<Marker>());
+    }
+
+    #[test]
+    fn test_pool_reuses_scope_after_resolving_self_holding_service() {
+        struct Holder(#[allow(dead_code)] Container);
+
+        let root = Container::new();
+        let pool = ScopePool::new(&root, 1);
+        for _ in 0..3 {
+            let scope = pool.acquire();
+            scope.singleton(Holder(scope.clone()));
+            // Caches the service (and its scope clone) on this thread.
+            let _ = scope.get::<Holder>().unwrap();
+        }
+        // The releasing thread's cache entries were evicted, so the scope
+        // was clean and unshared each time and went back to the pool.
+        assert_eq!(pool.available_count(), 1);
     }
 
     #[test]
