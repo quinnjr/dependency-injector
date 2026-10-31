@@ -30,9 +30,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **`ServiceProvider::provide` / `provide_transient` leaked the container**:
   the registered factory held a strong `Container` clone, forming an `Arc`
   cycle that kept the storage and every service in it alive forever. The
-  factory now holds a weak handle; `FrozenStorage` keeps its source storage
-  alive, so frozen factories keep working after the container is dropped
-  (frozen transients still resolve dependencies from the live container).
+  factory now holds a weak handle; a `FrozenStorage` containing transient
+  factories keeps its source storage alive, so they keep working after the
+  container is dropped (they still resolve dependencies from the live
+  container).
 - **Lazy initializers could deadlock on their own container**: they ran
   while a DashMap shard read guard was held, so one that registered, removed
   or cleared services in the same container deadlocked (as did `freeze`,
@@ -40,8 +41,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   run after the guard is released. Transient factories still run under the
   read guard to keep transient resolution fast, so nothing a transient
   factory runs or waits on (including lazy initializers it resolves, on any
-  thread, and `Drop` of services it releases) may write to its container;
-  that restriction is now documented on every transient registration method.
+  thread, and `Drop` of services it releases) may register, remove or clear
+  services in any container; that restriction is now documented on every
+  transient registration method.
 - **Hot cache slot selection ignored most input bits**: the slot came from
   the low bits of a multiply, which depend only on two bits of the type hash
   and bits 32-33 of the storage address, so nearby containers shared slots.

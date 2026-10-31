@@ -403,8 +403,8 @@ impl Container {
     ///
     /// The factory runs without holding any storage lock, so it may register,
     /// remove or clear services in this container (registration still panics
-    /// once the container is locked), unless a transient factory of that
-    /// container resolves this service, directly or through dependencies:
+    /// once the container is locked), unless any transient factory, in any
+    /// container, resolves this service directly or through dependencies:
     /// see [`Container::transient`]. It must not resolve its own type,
     /// directly or through a dependency cycle: that blocks forever.
     ///
@@ -450,17 +450,19 @@ impl Container {
     ///
     /// A new instance is created on every resolve.
     ///
-    /// The factory runs while this container's storage holds a read lock. It
-    /// may resolve services, but nothing it runs or waits on may register,
-    /// remove or clear services in this container, or the write waits for the
-    /// read lock forever. That includes:
+    /// The factory runs while this container's storage holds a read lock.
+    /// It may resolve services, but nothing it runs or waits on may register,
+    /// remove or clear services in **any** container: a write to this
+    /// container waits for the read lock forever, and a write to another
+    /// container can deadlock against that container's own transient
+    /// factories. "Runs or waits on" includes:
     ///
-    /// - writes made by the factory itself;
-    /// - initializers of lazy services it resolves, whether the initializer
-    ///   runs inside the factory or on another thread the factory waits for;
-    /// - `Drop` of services it releases, including services of *any*
-    ///   container that a resolution inside the factory evicts from this
-    ///   thread's hot cache.
+    /// - the factory's own code;
+    /// - initializers of lazy services it resolves, whether they run inside
+    ///   the factory or on another thread the factory waits for;
+    /// - `Drop` of services it releases, including services of any container
+    ///   that a resolution inside the factory evicts from this thread's hot
+    ///   cache.
     ///
     /// # Examples
     ///
@@ -935,8 +937,11 @@ impl Container {
     /// factories are shared with the container, so a transient that resolves
     /// dependencies from it (e.g. one registered with `provide_transient`)
     /// sees later `remove`/`clear` calls and fails if a dependency is gone.
-    /// The frozen storage keeps the container's services alive after the
-    /// container is dropped.
+    /// If transient factories are present, the frozen storage keeps the
+    /// container's storage (and its parents) alive after the container is
+    /// dropped, so do not register a frozen storage into the container it
+    /// was frozen from, or into any of its ancestors: that forms a cycle and
+    /// leaks both.
     ///
     /// # Example
     ///
@@ -1728,10 +1733,23 @@ mod tests {
                 }
             })
         };
-        for _ in 0..100_000 {
-            assert_eq!(*container.get::<u64>().unwrap(), 7);
-        }
+        // Read on a separate thread so a regression fails with a message
+        // instead of hanging the test run.
+        let (done_tx, done_rx) = std::sync::mpsc::channel();
+        let reader = std::thread::spawn(move || {
+            for _ in 0..100_000 {
+                assert_eq!(*container.get::<u64>().unwrap(), 7);
+            }
+            let _ = done_tx.send(());
+        });
+        let finished = done_rx.recv_timeout(std::time::Duration::from_secs(60));
         stop.store(true, Ordering::Relaxed);
+        assert!(
+            finished.is_ok(),
+            "dashmap no longer admits readers while a writer waits; \
+             transient factories that resolve from their container can deadlock"
+        );
+        reader.join().unwrap();
         writer.join().unwrap();
     }
 

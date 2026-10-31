@@ -234,7 +234,7 @@ pub trait ServiceProvider {
     ///
     /// A new instance is created on every resolution. As with
     /// [`Container::transient`], creating `T` (including resolving its
-    /// dependencies) must not register, remove or clear services in this
+    /// dependencies) must not register, remove or clear services in any
     /// container, directly or indirectly.
     fn provide_transient<T: Service>(&self);
 }
@@ -475,6 +475,32 @@ mod tests {
             .downcast::<Database>()
             .unwrap();
         assert_eq!(db.url, "debug://localhost");
+    }
+
+    #[cfg(feature = "perfect-hash")]
+    #[test]
+    fn test_frozen_child_without_transients_does_not_pin_ancestors() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        static DROPPED: AtomicUsize = AtomicUsize::new(0);
+
+        struct Tracked;
+        impl Drop for Tracked {
+            fn drop(&mut self) {
+                DROPPED.fetch_add(1, Ordering::SeqCst);
+            }
+        }
+
+        {
+            let root = Container::new();
+            root.singleton(Tracked);
+            let child = root.scope();
+            child.provide::<Config>();
+            let frozen = child.freeze();
+            // Storing the frozen child in its ancestor must not form a cycle.
+            root.singleton(frozen);
+        }
+        assert_eq!(DROPPED.load(Ordering::SeqCst), 1);
     }
 
     #[cfg(feature = "perfect-hash")]

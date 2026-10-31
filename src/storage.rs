@@ -426,9 +426,10 @@ struct HashableTypeId(TypeId);
 /// Uses minimal perfect hashing (MPHF) for ~5ns faster resolution.
 #[cfg(feature = "perfect-hash")]
 pub struct FrozenStorage {
-    /// Keeps the source storage alive: factories registered through
-    /// `ServiceProvider` hold only a weak handle to it.
-    _source: Arc<ServiceStorage>,
+    /// Keeps the source storage alive while transient factories are present:
+    /// those registered through `ServiceProvider` hold only a weak handle to
+    /// it. (Lazy services are initialized at freeze time and need nothing.)
+    _source: Option<Arc<ServiceStorage>>,
     /// The perfect hash function
     mphf: boomphf::Mphf<HashableTypeId>,
     /// Factories indexed by perfect hash
@@ -446,7 +447,6 @@ impl FrozenStorage {
     /// This computes a minimal perfect hash function for all registered TypeIds,
     /// enabling O(1) lookups without hash collisions.
     pub(crate) fn from_storage(storage: &Arc<ServiceStorage>) -> Self {
-        // Collect all entries as owned values
         // Clone under the iterator's shard guards (cheap, no user code), then
         // initialize lazy services once the guards are gone, so the frozen
         // storage is a snapshot and no initializer runs under a lock.
@@ -459,11 +459,15 @@ impl FrozenStorage {
             .into_iter()
             .map(|(type_id, factory)| (type_id, factory.into_initialized()))
             .collect();
+        let source = entries
+            .iter()
+            .any(|(_, factory)| factory.is_transient())
+            .then(|| Arc::clone(storage));
 
         let n = entries.len();
         if n == 0 {
             return Self {
-                _source: Arc::clone(storage),
+                _source: source,
                 mphf: boomphf::Mphf::new(1.7, &[]),
                 factories: Vec::new(),
                 type_ids: Vec::new(),
@@ -502,7 +506,7 @@ impl FrozenStorage {
             .map(|p| Arc::new(Self::from_storage(p)));
 
         Self {
-            _source: Arc::clone(storage),
+            _source: source,
             mphf,
             factories,
             type_ids,

@@ -325,6 +325,7 @@ impl AnyFactory {
 
     /// Initialize a lazy factory and return it as a singleton holding the
     /// (shared) instance; other factories are returned unchanged.
+    #[cfg(feature = "perfect-hash")]
     pub(crate) fn into_initialized(self) -> Self {
         match self {
             AnyFactory::Lazy(f) => AnyFactory::Singleton(SingletonFactory {
@@ -342,8 +343,8 @@ impl AnyFactory {
     /// admits readers unless a writer *holds* it (a waiting writer does not
     /// block them; this is an implementation detail, not dashmap API), so
     /// a transient factory may resolve services but must not register,
-    /// remove or clear them in the same container, directly or indirectly
-    /// (see `Container::transient`). The reader-admission behaviour is
+    /// remove or clear them in any container (see `Container::transient`).
+    /// The reader-admission behaviour is
     /// covered by `test_transient_reads_while_another_thread_writes`.
     #[inline]
     pub(crate) fn resolve_ready(&self) -> Resolution {
