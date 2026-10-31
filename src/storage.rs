@@ -109,6 +109,10 @@ pub struct ServiceStorage {
     /// can be detected as stale. Stamping happens inside `insert`/`clear`/
     /// `remove`, the only mutators, so no caller can forget to invalidate.
     generation: AtomicU64,
+    /// Count of insertions into this storage. Unlike `generation` (which
+    /// `clear` overwrites), it only ever increases, so `clear` can tell
+    /// whether anything was registered while it ran.
+    insertions: AtomicU64,
 }
 
 impl ServiceStorage {
@@ -130,6 +134,7 @@ impl ServiceStorage {
             ),
             parent: None,
             generation: AtomicU64::new(next_generation()),
+            insertions: AtomicU64::new(0),
         }
     }
 
@@ -152,6 +157,7 @@ impl ServiceStorage {
             ),
             parent: None,
             generation: AtomicU64::new(next_generation()),
+            insertions: AtomicU64::new(0),
         }
     }
 
@@ -170,6 +176,7 @@ impl ServiceStorage {
             ),
             parent: Some(parent),
             generation: AtomicU64::new(next_generation()),
+            insertions: AtomicU64::new(0),
         }
     }
 
@@ -177,6 +184,8 @@ impl ServiceStorage {
     #[inline]
     pub(crate) fn insert(&self, type_id: TypeId, factory: AnyFactory) {
         self.factories.insert(type_id, factory);
+        // Release pairs with the Acquire load in `clear`/`insertions_since`.
+        self.insertions.fetch_add(1, Ordering::Release);
         // Release pairs with the Acquire in `generation()`: a reader that
         // observes the new generation also observes the map mutation, keeping
         // the invalidation protocol self-contained (no reliance on DashMap's
@@ -300,6 +309,7 @@ impl ServiceStorage {
             factories: DashMap::with_capacity_and_hasher_and_shard_amount(0, RandomState::new(), 8),
             parent: Some(Arc::clone(self)),
             generation: AtomicU64::new(next_generation()),
+            insertions: AtomicU64::new(0),
         }
     }
 
@@ -324,12 +334,17 @@ impl ServiceStorage {
     /// Not atomic with respect to concurrent registration: a service
     /// registered while `clear` runs may survive it.
     ///
-    /// Returns `true` if nothing was registered after the services were
-    /// removed (e.g. by a service's `Drop`), i.e. the storage is empty unless
-    /// another thread registered concurrently. Checking the generation is
-    /// one atomic load, where `is_empty` would lock every shard.
+    /// Returns the insertion count observed at the start if nothing was
+    /// registered while `clear` ran (by another thread, or by a service's
+    /// `Drop`), in which case the storage was left empty; `None` otherwise.
+    /// Pass the count to [`Self::inserted_since`] to check later that the
+    /// storage is still empty, which is one atomic load where `is_empty`
+    /// would lock every shard.
     #[inline]
-    pub fn clear(&self) -> bool {
+    pub fn clear(&self) -> Option<u64> {
+        // Taken before removing anything, so an insertion racing with the
+        // removal (possibly into an already-visited shard) is noticed.
+        let insertions = self.insertions.load(Ordering::Acquire);
         // Move each factory out under the shard lock, leaving a `Vacant`
         // placeholder whose drop runs no user code; the real factories (and the
         // services they own) are dropped below, after the locks are gone.
@@ -345,8 +360,7 @@ impl ServiceStorage {
             false
         });
         // Release: see `insert`.
-        let cleared_generation = next_generation();
-        self.generation.store(cleared_generation, Ordering::Release);
+        self.generation.store(next_generation(), Ordering::Release);
         if let Some(mut removed) = removed {
             // Drops services; a re-entrant `clear` takes a fresh buffer.
             removed.clear();
@@ -356,8 +370,14 @@ impl ServiceStorage {
                 let _ = CLEAR_SCRATCH.try_with(|scratch| scratch.set(removed));
             }
         }
-        // Every registration stamps a new generation.
-        self.generation.load(Ordering::Acquire) == cleared_generation
+        (!self.inserted_since(insertions)).then_some(insertions)
+    }
+
+    /// Whether anything was registered since the insertion count was
+    /// `insertions` (as returned by [`Self::clear`]).
+    #[inline]
+    pub fn inserted_since(&self, insertions: u64) -> bool {
+        self.insertions.load(Ordering::Acquire) != insertions
     }
 
     /// Check if this storage has a parent
@@ -369,12 +389,14 @@ impl ServiceStorage {
     /// Remove a service
     #[inline]
     pub fn remove(&self, type_id: &TypeId) -> bool {
-        let removed = self.factories.remove(type_id).is_some();
-        if removed {
+        let removed = self.factories.remove(type_id);
+        if removed.is_some() {
             // Release: see `insert`.
             self.generation.store(next_generation(), Ordering::Release);
         }
-        removed
+        // Dropped after the generation bump (as in `clear`), so a service's
+        // `Drop` already observes the removal.
+        removed.is_some()
     }
 
     /// Get all registered type IDs
@@ -680,6 +702,37 @@ mod tests {
         assert!(frozen.is_empty());
         assert_eq!(frozen.len(), 0);
         assert!(!frozen.contains(&TypeId::of::<TestService>()));
+    }
+
+    #[test]
+    fn test_clear_reports_insertions_during_and_after_clear() {
+        struct RegistersOnDrop(Arc<ServiceStorage>);
+        impl Drop for RegistersOnDrop {
+            fn drop(&mut self) {
+                self.0
+                    .insert(TypeId::of::<u8>(), AnyFactory::singleton(1u8));
+            }
+        }
+
+        let storage = Arc::new(ServiceStorage::new());
+        storage.insert(TypeId::of::<u32>(), AnyFactory::singleton(1u32));
+        let insertions = storage.clear().expect("nothing registered during clear");
+        assert!(storage.is_empty());
+        assert!(!storage.inserted_since(insertions));
+
+        // A later registration is visible through the count.
+        storage.insert(TypeId::of::<u16>(), AnyFactory::singleton(1u16));
+        assert!(storage.inserted_since(insertions));
+        assert!(storage.clear().is_some());
+
+        // A registration made while clearing (from Drop) is reported.
+        storage.insert(
+            TypeId::of::<RegistersOnDrop>(),
+            AnyFactory::singleton(RegistersOnDrop(Arc::clone(&storage))),
+        );
+        assert!(storage.clear().is_none());
+        assert!(storage.contains(&TypeId::of::<u8>()));
+        assert!(storage.clear().is_some());
     }
 
     #[test]

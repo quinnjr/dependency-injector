@@ -34,13 +34,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   factories keeps its source storage alive, so they keep working after the
   container is dropped (they still resolve dependencies from the live
   container). Each `provide_transient` resolution now upgrades that weak
-  handle, costing roughly 7ns per resolution in benchmarks.
+  handle, costing roughly 7-10ns per resolution in benchmarks.
 - **`ScopePool` could hand out a dirty scope**: a service whose `Drop`
   registered into its scope during release, or a scope handle that outlived
-  the request (held by a cached service or another task), could write into
-  the pooled scope while it served the next request. Release now discards a
-  scope that is not empty after clearing or whose storage is still
-  referenced elsewhere, instead of reusing it.
+  the request (held by a cached service or another thread), could write into
+  the pooled scope while it served the next request. Release now reuses a
+  scope only if no other handle to it exists (checked with `Arc::get_mut`,
+  which synchronizes with other handles' drops) and nothing was registered
+  since it was cleared (tracked by a per-storage insertion counter);
+  otherwise the scope is discarded. These checks add roughly 6-12ns to a pooled
+  acquire/release cycle, and the counter about 3ns to each registration.
 - **Lazy initializers could deadlock on their own container**: they ran
   while a DashMap shard read guard was held, so one that registered, removed
   or cleared services in the same container deadlocked (as did `freeze`,
@@ -58,6 +61,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **`Container::clear` could deadlock**: services were dropped while DashMap
   shard write locks were held, so a `Drop` that touched the same container
   deadlocked. Services are now dropped after the locks are released.
+
+### Changed
+- `FrozenStorage::from_storage` is now crate-private. It took the internal
+  `ServiceStorage` type, so it was not callable from outside the crate; use
+  `Container::freeze`.
 
 ## [2.1.0] - 2026-07-27
 

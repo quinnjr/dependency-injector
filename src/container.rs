@@ -1333,6 +1333,14 @@ use std::sync::Mutex;
 /// }
 /// ```
 ///
+/// A released scope is only returned to the pool if nothing else can still
+/// write to it: if a clone of the scope (or a service holding one) outlives
+/// the request, or services' `Drop` impls keep registering into it, the
+/// scope is discarded instead and the pool shrinks until it creates a new
+/// one. (If `Drop` impls keep re-registering a service that holds the scope
+/// itself beyond a few clears, the discarded scope leaks through that
+/// cycle.)
+///
 /// # Performance
 ///
 /// - First acquisition: ~134ns (creates new scope if pool is empty)
@@ -1462,42 +1470,44 @@ impl ScopePool {
     /// Return a scope to the pool (internal use).
     #[inline]
     fn release(&self, container: Container) {
+        let Container {
+            mut storage,
+            locked,
+            ..
+        } = container;
         // Clear storage for reuse (parent reference is preserved). The clear
         // stamps a fresh generation, invalidating hot cache entries for this
-        // scope (including lingering clones of the container).
-        //
-        // `clear` reports whether anything was registered while it dropped
-        // the services; registrations from other threads are ruled out by
-        // the reference-count check below (nothing else holds the storage).
-        // A service's `Drop` may register into the scope during the clear
-        // (possibly something that holds the scope itself, which would leak
-        // it if left behind), so clear again a bounded number of times.
-        let mut empty = container.storage.clear();
+        // scope (including lingering clones of the container). A service's
+        // `Drop` may register into the scope while it is cleared (possibly
+        // something holding the scope itself, which would leak it if left
+        // behind), so clear again a bounded number of times. This runs even
+        // if the scope is then discarded, to break such cycles.
+        let mut cleared = storage.clear();
         for _ in 0..RELEASE_CLEAR_ATTEMPTS {
-            if empty {
+            if cleared.is_some() {
                 break;
             }
-            empty = container.storage.clear();
+            cleared = storage.clear();
         }
-        // Only reuse a scope nothing else can still write to: a service's
-        // `Drop` may have registered into it during the clear, and any other
-        // handle to its storage (a clone of the scope held by a service that
-        // is still cached or alive elsewhere, or a weak handle) could write
-        // into it later, while it serves another request.
-        if !empty
-            || Arc::strong_count(&container.storage) != 1
-            || Arc::weak_count(&container.storage) != 0
-        {
+        let Some(insertions) = cleared else {
+            return;
+        };
+        // Only reuse a scope nothing else can still write to. `get_mut`
+        // succeeds only if this is the sole strong handle and no weak handle
+        // exists, and its Acquire synchronizes with every other handle's
+        // release, so registrations made through those handles before they
+        // were dropped are visible to the check below.
+        if Arc::get_mut(&mut storage).is_none() || storage.inserted_since(insertions) {
             return;
         }
         // Reset lock state
-        container.locked.store(false, Ordering::Relaxed);
+        locked.store(false, Ordering::Relaxed);
 
         // Return to pool
-        self.available.lock().unwrap().push(ScopeSlot {
-            storage: container.storage,
-            locked: container.locked,
-        });
+        self.available
+            .lock()
+            .unwrap()
+            .push(ScopeSlot { storage, locked });
 
         #[cfg(feature = "logging")]
         trace!(
