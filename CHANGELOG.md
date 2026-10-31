@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.2.0] - 2026-10-31
+
 ### Fixed
 - **Hot cache type confusion (#58)**: the thread-local hot cache validated
   entries with a 64-bit value read out of `TypeId` via `transmute_copy`

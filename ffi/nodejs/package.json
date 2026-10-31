@@ -1,6 +1,6 @@
 {
   "name": "dependency-injector",
-  "version": "2.1.0",
+  "version": "2.2.0",
   "description": "Node.js bindings for the high-performance Rust dependency injection container",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
