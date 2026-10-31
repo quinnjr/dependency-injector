@@ -10,7 +10,7 @@
 | `get_transient` | **~24 ns** | ✅ |
 | `contains_check` | **~11 ns** | ✅ |
 | `create_scope` | **~80 ns** | ✅ |
-| `scope_pool_acquire` | **~56 ns** | ✅ |
+| `scope_pool_acquire` | **~65-70 ns** | ✅ |
 | `frozen_contains` | **~4 ns** | ✅ Perfect hash |
 
 ### vs Other Approaches

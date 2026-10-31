@@ -44,7 +44,7 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
 // Configuration
-const REPO_OWNER = 'pegasusheavy';
+const REPO_OWNER = 'quinnjr';
 const REPO_NAME = 'dependency-injector';
 const PACKAGE_VERSION = JSON.parse(
   fs.readFileSync(path.join(__dirname, '..', 'package.json'), 'utf8')

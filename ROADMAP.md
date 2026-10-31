@@ -105,7 +105,7 @@ local scripts retire. `RELEASING.md` documents the current canonical flow
 until this lands.
 
 - npm publish is not tag-triggered today: `scripts/deploy-ffi.sh` is the only
-  path that runs `pnpm publish` for `@pegasusheavy/dependency-injector`. Fold
+  path that runs `pnpm publish` for `dependency-injector`. Fold
   a tag-driven npm publish into this release-plz work so all binding packages
   ship from CI.
 

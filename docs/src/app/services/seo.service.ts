@@ -21,7 +21,7 @@ export class SeoService {
   private readonly title = inject(Title);
   private readonly document = inject(DOCUMENT);
 
-  private readonly baseUrl = 'https://pegasusheavy.github.io/dependency-injector';
+  private readonly baseUrl = 'https://quinnjr.github.io/dependency-injector';
   private readonly defaultImage = `${this.baseUrl}/og-image.png`;
   private readonly siteName = 'Dependency Injector';
 

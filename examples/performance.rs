@@ -35,7 +35,8 @@ fn main() {
 
     // --- ScopePool: reusable request scopes ---
     // Creating a scope allocates; a pool recycles those allocations so a
-    // request handler pays ~20ns per acquire instead of ~134ns per fresh scope.
+    // request handler pays ~65-70ns per acquire/release cycle instead of
+    // ~134ns for a fresh scope.
     println!("ScopePool with 4 pre-allocated scopes...");
     let pool = ScopePool::new(&root, 4);
     println!("  available scopes: {}", pool.available_count());
@@ -120,7 +121,7 @@ fn main() {
 
     println!("=== Demo Complete ===");
     println!("\nPerformance toolbox:");
-    println!("  - ScopePool: recycle request scopes (~20ns acquire vs ~134ns fresh)");
+    println!("  - ScopePool: recycle request scopes (~65-70ns per cycle vs ~134ns fresh)");
     println!("  - warm_cache/clear_cache: control the thread-local hot cache");
     println!("  - lock(): forbid registrations after startup");
     println!("  - freeze(): perfect-hash storage for collision-free O(1) lookups");

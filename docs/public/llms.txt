@@ -6,8 +6,8 @@ dependency-injector provides a thread-safe, type-safe DI container built on Dash
 
 ## Links
 
-- [Documentation](https://pegasusheavy.github.io/dependency-injector/)
-- [GitHub Repository](https://github.com/pegasusheavy/dependency-injector)
+- [Documentation](https://quinnjr.github.io/dependency-injector/)
+- [GitHub Repository](https://github.com/quinnjr/dependency-injector)
 - [Crates.io Package](https://crates.io/crates/dependency-injector)
 - [API Docs (docs.rs)](https://docs.rs/dependency-injector)
 

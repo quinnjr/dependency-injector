@@ -41,7 +41,7 @@ git push origin vX.Y.Z
 | [release.yml](.github/workflows/release.yml) | Validates tag == `Cargo.toml` version, runs `cargo test --all-features` + clippy, publishes to **crates.io** in order — `dependency-injector-derive` first, then `dependency-injector`, skipping any version already published — and creates the **GitHub Release** with a changelog grouped from conventional commits. |
 | [build-native.yml](.github/workflows/build-native.yml) | Builds the FFI `cdylib` for **5 platforms** (Linux x64/arm64, macOS x64/arm64, Windows x64) and attaches the libraries plus a **SHA256SUMS** manifest to the GitHub Release. |
 | [build-python-wheels.yml](.github/workflows/build-python-wheels.yml) | Builds platform wheels + sdist for `dependency-injector-rust`, publishes to **PyPI**, and attaches them to the release. |
-| [build-nuget.yml](.github/workflows/build-nuget.yml) | Packs `PegasusHeavy.DependencyInjector` with bundled native runtimes, pushes to **NuGet.org**, and attaches the `.nupkg` to the release. |
+| [build-nuget.yml](.github/workflows/build-nuget.yml) | Packs `DependencyInjector` with bundled native runtimes, pushes to **NuGet.org**, and attaches the `.nupkg` to the release. |
 
 After the Release workflow completes, the new
 [verify-release.yml](.github/workflows/verify-release.yml) runs automatically
@@ -51,7 +51,7 @@ all five native libraries are attached to the GitHub Release.
 
 ### Known gap in the tag flow
 
-- The npm package `@pegasusheavy/dependency-injector` is **not** published by any tag
+- The npm package `dependency-injector` is **not** published by any tag
   workflow today; `scripts/deploy-ffi.sh` is still the only path that runs `pnpm publish`.
 
 ## Legacy scripts

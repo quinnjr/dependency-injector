@@ -15,7 +15,7 @@ recipes — see the [justfile](justfile) (`just` with no arguments lists them).
 ## Getting started
 
 ```bash
-git clone https://github.com/pegasusheavy/dependency-injector
+git clone https://github.com/quinnjr/dependency-injector
 cd dependency-injector
 cargo test --all-features
 ```

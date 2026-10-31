@@ -1,6 +1,6 @@
 [package]
 name = "dependency-injector"
-version = "2.1.0"
+version = "2.2.0"
 edition = "2024"
 rust-version = "1.85"
 description = "High-performance, lock-free dependency injection container for Rust"
@@ -8,7 +8,7 @@ license = "MIT OR Apache-2.0"
 keywords = ["dependency-injection", "di", "ioc", "container", "service-locator"]
 categories = ["development-tools", "rust-patterns", "concurrency"]
 readme = "README.md"
-repository = "https://github.com/pegasusheavy/dependency-injector"
+repository = "https://github.com/quinnjr/dependency-injector"
 documentation = "https://docs.rs/dependency-injector"
 
 # Files to exclude from crates.io publish
@@ -99,6 +99,11 @@ ffi = []
 
 [dependencies]
 # Lock-free concurrent hashmap - much faster than RwLock<HashMap>
+# Transient factories rely on its RawRwLock admitting readers while a writer
+# waits (true from 5.5 through 6.2; see AnyFactory::resolve_ready). Cargo.lock
+# is not committed, so CI resolves the newest 6.x and its
+# test_transient_reads_while_another_thread_writes catches a change there
+# (capping the version instead would break downstream resolution).
 dashmap = "6"
 
 # Faster hashing for TypeId keys
@@ -121,7 +126,7 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"], optional = tr
 tokio = { version = "1.0", features = ["sync"], optional = true }
 
 # Derive macros (optional)
-dependency-injector-derive = { version = "2.1.0", path = "dependency-injector-derive", optional = true }
+dependency-injector-derive = { version = "2.2.0", path = "dependency-injector-derive", optional = true }
 
 # Minimal perfect hashing for locked containers (optional)
 boomphf = { version = "0.6", optional = true }

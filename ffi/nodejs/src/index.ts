@@ -6,7 +6,7 @@
  *
  * @example
  * ```typescript
- * import { Container } from '@pegasusheavy/dependency-injector';
+ * import { Container } from 'dependency-injector';
  *
  * const container = new Container();
  *

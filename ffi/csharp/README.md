@@ -14,7 +14,7 @@ C# bindings for the high-performance Rust dependency injection container.
 ## Installation
 
 ```bash
-dotnet add package PegasusHeavy.DependencyInjector
+dotnet add package DependencyInjector
 ```
 
 The NuGet package includes pre-built native libraries for:
@@ -34,7 +34,7 @@ If you want to build the native library from source:
 curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
 
 # Clone and build
-git clone https://github.com/pegasusheavy/dependency-injector
+git clone https://github.com/quinnjr/dependency-injector
 cd dependency-injector
 cargo rustc --release --features ffi --crate-type cdylib
 

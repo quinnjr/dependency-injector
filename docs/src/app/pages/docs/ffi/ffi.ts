@@ -26,14 +26,14 @@ export class FfiPage implements OnInit {
       name: 'Go',
       icon: 'golang',
       description: 'High-performance Go bindings via cgo',
-      install: 'go get github.com/pegasusheavy/dependency-injector/ffi/go/di',
+      install: 'go get github.com/quinnjr/dependency-injector/ffi/go/di',
       features: ['Struct serialization', 'Error handling with sentinel errors', 'Finalizer-based cleanup']
     },
     {
       name: 'Node.js',
       icon: 'node-js',
       description: 'TypeScript bindings via koffi (no native compilation)',
-      install: 'pnpm add @pegasusheavy/dependency-injector',
+      install: 'pnpm add dependency-injector',
       features: ['Full TypeScript support', 'Generic type inference', 'SWC-powered builds']
     },
     {
@@ -47,7 +47,7 @@ export class FfiPage implements OnInit {
       name: 'C#',
       icon: 'microsoft',
       description: '.NET 8.0+ bindings via P/Invoke',
-      install: 'dotnet add package PegasusHeavy.DependencyInjector',
+      install: 'dotnet add package DependencyInjector',
       features: ['Record type support', 'IDisposable pattern', 'Generic resolution']
     }
   ];
@@ -57,7 +57,7 @@ export class FfiPage implements OnInit {
       title: 'FFI Bindings - Go, Node.js, Python, C# | Dependency Injector',
       description: 'Use the Rust dependency-injector from Go, Node.js/TypeScript, Python, and C#. Cross-language FFI bindings with ~300ns resolution.',
       keywords: ['ffi', 'go bindings', 'nodejs bindings', 'python bindings', 'csharp bindings', 'cross-language'],
-      canonical: 'https://pegasusheavy.github.io/dependency-injector/docs/ffi'
+      canonical: 'https://quinnjr.github.io/dependency-injector/docs/ffi'
     });
   }
 }

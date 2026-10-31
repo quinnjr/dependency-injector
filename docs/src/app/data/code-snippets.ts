@@ -271,7 +271,7 @@ test_scope.singleton(Database { url: <span class="text-green-400">"test"</span>.
 
 <span class="text-purple-400">import</span> (
     <span class="text-green-400">"fmt"</span>
-    <span class="text-green-400">"github.com/pegasusheavy/dependency-injector/ffi/go/di"</span>
+    <span class="text-green-400">"github.com/quinnjr/dependency-injector/ffi/go/di"</span>
 )
 
 <span class="text-purple-400">type</span> <span class="text-blue-400">Config</span> <span class="text-purple-400">struct</span> {
@@ -295,7 +295,7 @@ test_scope.singleton(Database { url: <span class="text-green-400">"test"</span>.
 }`,
 
   // FFI - Node.js
-  ffiNodejs: `<span class="text-purple-400">import</span> { Container } <span class="text-purple-400">from</span> <span class="text-green-400">'@pegasusheavy/dependency-injector'</span>;
+  ffiNodejs: `<span class="text-purple-400">import</span> { Container } <span class="text-purple-400">from</span> <span class="text-green-400">'dependency-injector'</span>;
 
 <span class="text-slate-500">// Define types</span>
 <span class="text-purple-400">interface</span> <span class="text-blue-400">Config</span> {

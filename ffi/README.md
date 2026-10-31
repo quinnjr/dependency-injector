@@ -5,7 +5,7 @@ This directory contains FFI (Foreign Function Interface) bindings that allow the
 ## Supported Languages
 
 - **C/C++** - via `dependency_injector.h`
-- **C#** - via `csharp/` package (P/Invoke, NuGet: `PegasusHeavy.DependencyInjector`)
+- **C#** - via `csharp/` package (P/Invoke, NuGet: `DependencyInjector`)
 - **Go** - via `go/di` package
 - **Node.js/TypeScript** - via `nodejs/` package
 - **Python** - via `python/` package
@@ -64,7 +64,7 @@ gcc -o myapp myapp.c -L/path/to/target/release -ldependency_injector -I/path/to/
 
 1. Install the NuGet package (bundles pre-built native libraries):
    ```bash
-   dotnet add package PegasusHeavy.DependencyInjector
+   dotnet add package DependencyInjector
    ```
 
    Or build the native library from source and point to it:
@@ -127,7 +127,7 @@ dotnet run --project Example
 
 3. Import the package:
    ```go
-   import "github.com/pegasusheavy/dependency-injector/ffi/go/di"
+   import "github.com/quinnjr/dependency-injector/ffi/go/di"
    ```
 
 ### Example
@@ -139,7 +139,7 @@ import (
     "fmt"
     "log"
 
-    "github.com/pegasusheavy/dependency-injector/ffi/go/di"
+    "github.com/quinnjr/dependency-injector/ffi/go/di"
 )
 
 type Config struct {
@@ -217,7 +217,7 @@ go run main.go
 ### Example
 
 ```typescript
-import { Container } from '@pegasusheavy/dependency-injector';
+import { Container } from 'dependency-injector';
 
 interface Config {
   debug: boolean;

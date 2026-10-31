@@ -19,7 +19,7 @@ import (
 	"fmt"
 	"log"
 
-	"github.com/pegasusheavy/dependency-injector/ffi/go/di"
+	"github.com/quinnjr/dependency-injector/ffi/go/di"
 )
 
 // Config represents application configuration.

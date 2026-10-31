@@ -37,7 +37,7 @@ set PATH=%PATH%;C:\path\to\dependency-injector\target\release
 ## Installation
 
 ```bash
-go get github.com/pegasusheavy/dependency-injector/ffi/go/di
+go get github.com/quinnjr/dependency-injector/ffi/go/di
 ```
 
 ## Quick Start
@@ -49,7 +49,7 @@ import (
     "fmt"
     "log"
 
-    "github.com/pegasusheavy/dependency-injector/ffi/go/di"
+    "github.com/quinnjr/dependency-injector/ffi/go/di"
 )
 
 type Config struct {

@@ -49,7 +49,7 @@ export interface ProcessedBenchmark {
   providedIn: 'root'
 })
 export class BenchmarkService {
-  private readonly DATA_URL = 'https://pegasusheavy.github.io/dependency-injector/benchmarks/data.js';
+  private readonly DATA_URL = 'https://quinnjr.github.io/dependency-injector/benchmarks/data.js';
   private readonly FALLBACK_URL = './assets/benchmarks/data.json';
 
   readonly loading = signal(true);
@@ -192,7 +192,7 @@ export class BenchmarkService {
     // Phase 11: Fast bit-mixing hash + single DashMap lookup + reduced shards
     return {
       lastUpdate: new Date(measured).toISOString(),
-      repoUrl: 'https://github.com/pegasusheavy/dependency-injector',
+      repoUrl: 'https://github.com/quinnjr/dependency-injector',
       entries: {
         'Rust Benchmarks': [
           {
@@ -200,8 +200,8 @@ export class BenchmarkService {
               id: 'e7ed62b',
               message: 'perf: Phase 11 - Fast bit-mixing hash + single DashMap lookup',
               timestamp: new Date(measured).toISOString(),
-              url: 'https://github.com/pegasusheavy/dependency-injector/commit/e7ed62b',
-              author: { name: 'Developer', username: 'pegasusheavy' }
+              url: 'https://github.com/quinnjr/dependency-injector/commit/e7ed62b',
+              author: { name: 'Developer', username: 'quinnjr' }
             },
             date: measured,
             tool: 'cargo',
@@ -222,7 +222,7 @@ export class BenchmarkService {
               { name: 'transient/get_transient', value: 24.0, unit: 'ns/iter', range: '± 0.5' },
               // Scoped benchmarks (Phase 11: 4-shard DashMap for child scopes)
               { name: 'scoped/create_scope', value: 80, unit: 'ns/iter', range: '± 3' },
-              { name: 'scoped/scope_pool_acquire', value: 56, unit: 'ns/iter', range: '± 2' },
+              { name: 'scoped/scope_pool_acquire', value: 68, unit: 'ns/iter', range: '± 3' },
               { name: 'scoped/resolve_from_parent', value: 9.0, unit: 'ns/iter', range: '± 0.2' },
               { name: 'scoped/deep_parent_chain', value: 18.0, unit: 'ns/iter', range: '± 0.4' },
               { name: 'scoped/resolve_override', value: 9.0, unit: 'ns/iter', range: '± 0.2' },
@@ -250,8 +250,8 @@ export class BenchmarkService {
               id: 'v0.1.5',
               message: 'feat: Phase 4 - Derive macros for automatic injection',
               timestamp: new Date(measured - day).toISOString(),
-              url: 'https://github.com/pegasusheavy/dependency-injector/commit/v0.1.5',
-              author: { name: 'Developer', username: 'pegasusheavy' }
+              url: 'https://github.com/quinnjr/dependency-injector/commit/v0.1.5',
+              author: { name: 'Developer', username: 'quinnjr' }
             },
             date: measured - day,
             tool: 'cargo',
@@ -284,8 +284,8 @@ export class BenchmarkService {
               id: 'v0.1.0',
               message: 'Initial release',
               timestamp: new Date(measured - 2 * day).toISOString(),
-              url: 'https://github.com/pegasusheavy/dependency-injector/releases/tag/v0.1.0',
-              author: { name: 'Developer', username: 'pegasusheavy' }
+              url: 'https://github.com/quinnjr/dependency-injector/releases/tag/v0.1.0',
+              author: { name: 'Developer', username: 'quinnjr' }
             },
             date: measured - 2 * day,
             tool: 'cargo',

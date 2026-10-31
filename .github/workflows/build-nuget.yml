@@ -14,7 +14,7 @@ permissions:
   contents: write
 
 env:
-  PACKAGE_NAME: PegasusHeavy.DependencyInjector
+  PACKAGE_NAME: DependencyInjector
 
 jobs:
   build-native:
@@ -166,7 +166,7 @@ jobs:
     if: startsWith(github.ref, 'refs/tags/v')
     environment:
       name: nuget
-      url: https://www.nuget.org/packages/PegasusHeavy.DependencyInjector
+      url: https://www.nuget.org/packages/DependencyInjector
 
     steps:
       - name: Download NuGet package

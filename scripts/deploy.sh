@@ -522,7 +522,7 @@ print_summary() {
         echo "Links:"
         echo "  • https://crates.io/crates/dependency-injector"
         echo "  • https://docs.rs/dependency-injector"
-        echo "  • https://github.com/pegasusheavy/dependency-injector/releases/tag/v$VERSION"
+        echo "  • https://github.com/quinnjr/dependency-injector/releases/tag/v$VERSION"
     fi
     echo ""
 }

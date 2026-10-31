@@ -35,7 +35,7 @@ If pre-built wheels aren't available for your platform, or you want to build fro
 curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
 
 # Clone and build
-git clone https://github.com/pegasusheavy/dependency-injector
+git clone https://github.com/quinnjr/dependency-injector
 cd dependency-injector
 cargo rustc --release --features ffi --crate-type cdylib
 

@@ -1,4 +1,4 @@
-module github.com/pegasusheavy/dependency-injector/ffi/go/di
+module github.com/quinnjr/dependency-injector/ffi/go/di
 
 go 1.21
 

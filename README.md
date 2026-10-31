@@ -2,7 +2,7 @@
 
 [![Crates.io](https://img.shields.io/crates/v/dependency-injector.svg)](https://crates.io/crates/dependency-injector)
 [![Documentation](https://docs.rs/dependency-injector/badge.svg)](https://docs.rs/dependency-injector)
-[![CI](https://github.com/pegasusheavy/dependency-injector/actions/workflows/ci.yml/badge.svg)](https://github.com/pegasusheavy/dependency-injector/actions/workflows/ci.yml)
+[![CI](https://github.com/quinnjr/dependency-injector/actions/workflows/ci.yml/badge.svg)](https://github.com/quinnjr/dependency-injector/actions/workflows/ci.yml)
 [![License](https://img.shields.io/crates/l/dependency-injector.svg)](LICENSE)
 
 A high-performance, lock-free dependency injection container for Rust.
@@ -205,13 +205,13 @@ fn main() {
 | `#[inject(optional)]` | `Option<Arc<T>>` | Optional dependency - `None` if not registered |
 | (none) | Any type with `Default` | Uses `Default::default()` |
 
-See also the [compile-time typed builder guide](https://pegasusheavy.github.io/dependency-injector/docs/guide) on the docs site for fully compile-time-checked registration with `TypedBuilder`.
+See also the [compile-time typed builder guide](https://quinnjr.github.io/dependency-injector/docs/guide) on the docs site for fully compile-time-checked registration with `TypedBuilder`.
 
 ## Framework Integration
 
 ### With Armature
 
-[Armature](https://github.com/pegasusheavy/armature) is a Rust HTTP framework with built-in DI support:
+[Armature](https://github.com/quinnjr/armature) is a Rust HTTP framework with built-in DI support:
 
 ```rust
 use armature::prelude::*;
@@ -235,7 +235,7 @@ struct AppModule {
 ```
 
 > **Note**: This snippet is illustrative only. The full, working example lives in — and is
-> maintained and tested by — the [Armature repository](https://github.com/pegasusheavy/armature);
+> maintained and tested by — the [Armature repository](https://github.com/quinnjr/armature);
 > it is not compiled as part of this crate.
 
 ## API Reference
@@ -253,9 +253,9 @@ struct AppModule {
 
 ## Documentation
 
-- 📚 **[Full Documentation](https://pegasusheavy.github.io/dependency-injector/)** - Comprehensive guides and API reference
+- 📚 **[Full Documentation](https://quinnjr.github.io/dependency-injector/)** - Comprehensive guides and API reference
 - 📖 **[docs.rs](https://docs.rs/dependency-injector)** - API documentation
-- 📊 **[Benchmarks](https://pegasusheavy.github.io/dependency-injector/benchmarks)** - Performance metrics
+- 📊 **[Benchmarks](https://quinnjr.github.io/dependency-injector/benchmarks)** - Performance metrics
 
 ## Logging
 
@@ -397,7 +397,7 @@ package main
 import (
     "fmt"
 
-    "github.com/pegasusheavy/dependency-injector/ffi/go/di"
+    "github.com/quinnjr/dependency-injector/ffi/go/di"
 )
 
 func main() {

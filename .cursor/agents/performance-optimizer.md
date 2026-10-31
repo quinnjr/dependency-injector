@@ -34,8 +34,10 @@ After optimizing:
 
 ## Common Patterns in This Codebase
 
-- **Thread-local hot cache**: 4-slot LRU using `UnsafeCell`
-- **TypeId hashing**: Custom bit-mixing for faster hash
+- **Thread-local hot cache**: 4-slot direct-mapped cache using `UnsafeCell`;
+  entries store the full `TypeId` and compare it exactly before downcasting
+- **TypeId hashing**: fixed-seed ahash of `TypeId` plus bit-mixing, used only
+  for slot selection (never transmute `TypeId`; its layout is unspecified)
 - **DashMap sharding**: Reduced shards (4) for child scopes
 - **Arc cloning**: Prefer cloning Arc over re-resolution
 

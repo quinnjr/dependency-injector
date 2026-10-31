@@ -1,7 +1,7 @@
 blank_issues_enabled: false
 contact_links:
   - name: Questions & Discussions
-    url: https://github.com/pegasusheavy/dependency-injector/discussions
+    url: https://github.com/quinnjr/dependency-injector/discussions
     about: Ask questions and discuss ideas in GitHub Discussions
   - name: Documentation
     url: https://docs.rs/dependency-injector

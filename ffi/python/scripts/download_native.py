@@ -66,7 +66,7 @@ import json
 from pathlib import Path
 
 # Configuration
-REPO_OWNER = "pegasusheavy"
+REPO_OWNER = "quinnjr"
 REPO_NAME = "dependency-injector"
 PACKAGE_DIR = Path(__file__).parent.parent / "dependency_injector"
 

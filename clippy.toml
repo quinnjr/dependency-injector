@@ -1,0 +1,8 @@
+# Reading a `TypeId` through `transmute_copy` relies on its unspecified layout
+# and caused the hot cache type confusion in #58; compare or hash `TypeId`
+# through its own `Eq`/`Hash` instead. Clippy cannot ban `transmute` for one
+# type only, so a plain `transmute` of a `TypeId` is not caught here; the
+# crate has no `transmute` at all, and new ones need the same scrutiny.
+disallowed-methods = [
+    { path = "std::mem::transmute_copy", reason = "TypeId layout is unspecified (#58); use TypeId's Eq/Hash" },
+]

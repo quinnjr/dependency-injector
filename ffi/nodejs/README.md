@@ -1,4 +1,4 @@
-# @pegasusheavy/dependency-injector
+# dependency-injector
 
 Node.js/TypeScript bindings for the high-performance Rust dependency injection container.
 
@@ -15,7 +15,7 @@ Node.js/TypeScript bindings for the high-performance Rust dependency injection c
 ## Installation
 
 ```bash
-pnpm add @pegasusheavy/dependency-injector
+pnpm add dependency-injector
 ```
 
 The package automatically downloads pre-built native libraries for:
@@ -35,7 +35,7 @@ If pre-built binaries aren't available for your platform, or you want to build f
 curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
 
 # Clone and build
-git clone https://github.com/pegasusheavy/dependency-injector
+git clone https://github.com/quinnjr/dependency-injector
 cd dependency-injector
 cargo rustc --release --features ffi --crate-type cdylib
 
@@ -72,7 +72,7 @@ package will fail until one is built or fetched.
 ## Quick Start
 
 ```typescript
-import { Container } from '@pegasusheavy/dependency-injector';
+import { Container } from 'dependency-injector';
 
 // Define your service interfaces
 interface Config {
@@ -223,7 +223,7 @@ Get the library version.
 Error class thrown by the container.
 
 ```typescript
-import { DIError, ErrorCode } from '@pegasusheavy/dependency-injector';
+import { DIError, ErrorCode } from 'dependency-injector';
 
 try {
   container.resolve('NonExistent');

@@ -232,16 +232,23 @@ pub trait ServiceProvider {
 
     /// Register a service as transient.
     ///
-    /// A new instance is created on every resolution.
+    /// A new instance is created on every resolution. As with
+    /// [`Container::transient`], creating `T` (including resolving its
+    /// dependencies) must not register, remove or clear services in any
+    /// container, directly or indirectly.
     fn provide_transient<T: Service>(&self);
 }
 
 impl ServiceProvider for Container {
     #[inline]
     fn provide<T: Service>(&self) {
-        let container = self.clone();
+        // Weak: the factory is owned by this container's storage, so a strong
+        // handle would form an Arc cycle and leak the container.
+        let container = self.downgrade();
         self.lazy(move || {
-            let deps = T::Dependencies::resolve(&container)
+            let deps = container
+                .with(T::Dependencies::resolve)
+                .expect("container dropped while resolving a service")
                 .expect("Failed to resolve dependencies for service");
             T::create(deps)
         });
@@ -259,9 +266,13 @@ impl ServiceProvider for Container {
 
     #[inline]
     fn provide_transient<T: Service>(&self) {
-        let container = self.clone();
+        // Weak: the factory is owned by this container's storage, so a strong
+        // handle would form an Arc cycle and leak the container.
+        let container = self.downgrade();
         self.transient(move || {
-            let deps = T::Dependencies::resolve(&container)
+            let deps = container
+                .with(T::Dependencies::resolve)
+                .expect("container dropped while resolving a transient service")
                 .expect("Failed to resolve dependencies for transient service");
             T::create(deps)
         });
@@ -388,6 +399,125 @@ impl_dependency_info_tuple!(A, B, C, D, E, F);
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_provided_services_are_freed_with_container() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        static DROPPED: AtomicUsize = AtomicUsize::new(0);
+
+        struct Tracked;
+        impl Drop for Tracked {
+            fn drop(&mut self) {
+                DROPPED.fetch_add(1, Ordering::SeqCst);
+            }
+        }
+        impl Service for Tracked {
+            type Dependencies = ();
+            fn create(_: ()) -> Self {
+                Tracked
+            }
+        }
+
+        let container = Container::new();
+        container.provide::<Tracked>();
+        drop(container.get::<Tracked>().unwrap());
+        drop(container);
+        // The hot cache holds its own Arc to the resolved service.
+        Container::new().clear_cache();
+
+        // A factory holding a strong Container would keep the storage, and
+        // with it the service, alive forever.
+        assert_eq!(DROPPED.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn test_provided_transient_factories_are_freed_with_container() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        static DROPPED: AtomicUsize = AtomicUsize::new(0);
+
+        struct Tracked;
+        impl Drop for Tracked {
+            fn drop(&mut self) {
+                DROPPED.fetch_add(1, Ordering::SeqCst);
+            }
+        }
+
+        let container = Container::new();
+        container.singleton(Tracked);
+        container.provide_transient::<Database>();
+        container.provide::<Config>();
+        assert!(container.get::<Database>().is_ok());
+        drop(container);
+
+        // Tracked lives in the container's storage; it is only dropped if no
+        // factory keeps that storage alive.
+        assert_eq!(DROPPED.load(Ordering::SeqCst), 1);
+    }
+
+    #[cfg(feature = "perfect-hash")]
+    #[test]
+    fn test_freeze_snapshots_lazy_services() {
+        let container = Container::new();
+        container.provide::<Config>();
+        container.provide::<Database>();
+        let frozen = container.freeze();
+
+        // Changes after the freeze must not reach the frozen storage.
+        container.clear();
+
+        let db = frozen
+            .resolve(&std::any::TypeId::of::<Database>())
+            .expect("registered before freeze")
+            .downcast::<Database>()
+            .unwrap();
+        assert_eq!(db.url, "debug://localhost");
+    }
+
+    #[cfg(feature = "perfect-hash")]
+    #[test]
+    fn test_frozen_child_without_transients_does_not_pin_ancestors() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        static DROPPED: AtomicUsize = AtomicUsize::new(0);
+
+        struct Tracked;
+        impl Drop for Tracked {
+            fn drop(&mut self) {
+                DROPPED.fetch_add(1, Ordering::SeqCst);
+            }
+        }
+
+        {
+            let root = Container::new();
+            root.singleton(Tracked);
+            let child = root.scope();
+            child.provide::<Config>();
+            let frozen = child.freeze();
+            // Storing the frozen child in its ancestor must not form a cycle.
+            root.singleton(frozen);
+        }
+        assert_eq!(DROPPED.load(Ordering::SeqCst), 1);
+    }
+
+    #[cfg(feature = "perfect-hash")]
+    #[test]
+    fn test_frozen_provided_transient_outlives_container() {
+        let frozen = {
+            let container = Container::new();
+            container.provide::<Config>();
+            container.provide_transient::<Database>();
+            container.freeze()
+        };
+
+        let db = frozen
+            .resolve(&std::any::TypeId::of::<Database>())
+            .expect("transient registered")
+            .downcast::<Database>()
+            .unwrap();
+        assert_eq!(db.url, "debug://localhost");
+    }
 
     #[derive(Clone)]
     struct Config {
