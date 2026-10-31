@@ -14,7 +14,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   layout, so a collision would read one service type as another. Entries now
   store the full `TypeId` and compare it exactly; a hash of it is used only
   for slot selection. The `perfect-hash` storage's `TypeId` hashing no longer
-  transmutes either.
+  transmutes either. Cache hits cost the same; a cache miss costs roughly 3ns
+  more (exact comparison, and evicted entries dropped outside the borrow).
 - **`register_by_id` accepted mismatched types**: registering an instance
   under a `TypeId` that did not describe its concrete type let `get::<T>()`
   reinterpret it as `T` (undefined behaviour from safe code). It now panics
@@ -41,15 +42,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the pooled scope while it served the next request. Release now reuses a
   scope only if no other handle to it exists (checked with `Arc::get_mut`,
   which synchronizes with other handles' drops) and nothing was registered
-  since it was cleared (tracked by a per-storage insertion counter);
-  otherwise the scope is discarded. Release first evicts the releasing
-  thread's hot-cache entries for the scope, so those services' `Drop` runs
-  during release; services cached by other threads still keep the scope
-  from being reused. These checks add roughly 6-12ns to a pooled
+  since it was cleared (tracked by a per-storage insertion counter); otherwise
+  the scope is discarded. Release first evicts the releasing thread's
+  hot-cache entries for the scope, so those services' `Drop` runs during
+  release; services cached by other threads that hold a handle to the scope
+  still keep it from being reused. These checks add roughly 6-12ns to a pooled
   acquire/release cycle, and the counter about 3ns to each registration. A
-  request that resolves services from its scope pays roughly another 10ns at
-  release, where its cached services are now dropped (previously that
-  happened at some later cache eviction).
+  request that resolves services from its scope pays roughly another 15-25ns
+  at release, where its cached services are now evicted and dropped
+  (previously that happened at some later cache eviction).
 - **Lazy initializers could deadlock on their own container**: they ran
   while a DashMap shard read guard was held, so one that registered, removed
   or cleared services in the same container deadlocked (as did `freeze`,
@@ -66,7 +67,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   It now uses the product's top bits (Fibonacci hashing).
 - **`Container::clear` could deadlock**: services were dropped while DashMap
   shard write locks were held, so a `Drop` that touched the same container
-  deadlocked. Services are now dropped after the locks are released.
+  deadlocked. Services are now dropped after the locks are released
+  (`clear` costs roughly 8ns more as a result).
 
 ### Deprecated
 - `FrozenStorage::from_storage` is deprecated in favour of

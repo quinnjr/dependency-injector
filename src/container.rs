@@ -244,7 +244,7 @@ fn cache_evict_storage(storage_ptr: usize) {
 #[cold]
 #[inline(never)]
 fn cache_evict_storage_slow(storage_ptr: usize) {
-    for _ in 0..2 {
+    let evict = || {
         let evicted = HOT_CACHE.try_with(|cell| {
             // SAFETY: as in `cache_service`; `evict_storage` only moves
             // entries, which are dropped after this borrow ends.
@@ -252,6 +252,16 @@ fn cache_evict_storage_slow(storage_ptr: usize) {
             cache.evict_storage(storage_ptr)
         });
         drop(evicted);
+    };
+    evict();
+    // Only pay for a second pass if those drops re-cached something.
+    let recached = HOT_CACHE.try_with(|cell| {
+        // SAFETY: as in `cache_get`; this only reads the entries.
+        let cache = unsafe { &*cell.get() };
+        (cache.entries.iter().flatten()).any(|e| e.storage_ptr == storage_ptr)
+    });
+    if recached == Ok(true) {
+        evict();
     }
 }
 
@@ -1391,8 +1401,9 @@ use std::sync::Mutex;
 /// the request, or services' `Drop` impls keep registering into it, the
 /// scope is discarded instead and the pool shrinks until it creates a new
 /// one. Services the releasing thread resolved directly from the scope are
-/// evicted from its cache first; services cached by other threads, or cached
-/// for the scope's child scopes, still count as holding it. (If `Drop` impls
+/// evicted from its cache first; services cached by other threads (or for
+/// the scope's child scopes) that hold a handle to the scope still count as
+/// holding it. (If `Drop` impls
 /// keep re-registering a service that holds the scope itself beyond a few
 /// clears, the discarded scope leaks through that cycle.)
 ///
@@ -1772,6 +1783,58 @@ mod tests {
             assert!(scope.remove::<ResolvesHolderOnDrop>());
         }
         assert_eq!(pool.available_count(), 1);
+    }
+
+    #[test]
+    fn test_pool_discards_scope_registered_into_after_final_clear() {
+        struct Marker;
+        // Each drop registers the next link (holding the scope) until the
+        // last registers Marker, which holds no handle, after the final
+        // clear: only the insertion checks keep that scope out of the pool.
+        struct Link(Container, usize);
+        impl Drop for Link {
+            fn drop(&mut self) {
+                if self.1 == 0 {
+                    self.0.singleton(Marker);
+                } else {
+                    self.0.singleton(Link(self.0.clone(), self.1 - 1));
+                }
+            }
+        }
+
+        let root = Container::new();
+        let pool = ScopePool::new(&root, 1);
+        {
+            let scope = pool.acquire();
+            scope.singleton(Link(scope.clone(), RELEASE_CLEAR_ATTEMPTS));
+        }
+        assert!(!pool.acquire().contains::<Marker>());
+    }
+
+    #[test]
+    fn test_clear_cache_from_drop_at_thread_exit() {
+        use std::sync::atomic::AtomicUsize;
+
+        static DROPS: AtomicUsize = AtomicUsize::new(0);
+
+        struct ClearsCacheOnDrop;
+        impl Drop for ClearsCacheOnDrop {
+            fn drop(&mut self) {
+                // Runs from the hot cache's own thread-local destructor.
+                Container::new().clear_cache();
+                DROPS.fetch_add(1, Ordering::SeqCst);
+            }
+        }
+
+        std::thread::spawn(|| {
+            let container = Container::new();
+            container.singleton(ClearsCacheOnDrop);
+            let _ = container.get::<ClearsCacheOnDrop>().unwrap();
+            drop(container);
+        })
+        .join()
+        .unwrap();
+        assert_eq!(DROPS.load(Ordering::SeqCst), 1);
     }
 
     #[test]
