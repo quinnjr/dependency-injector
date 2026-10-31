@@ -460,6 +460,25 @@ mod tests {
 
     #[cfg(feature = "perfect-hash")]
     #[test]
+    fn test_freeze_snapshots_lazy_services() {
+        let container = Container::new();
+        container.provide::<Config>();
+        container.provide::<Database>();
+        let frozen = container.freeze();
+
+        // Changes after the freeze must not reach the frozen storage.
+        container.clear();
+
+        let db = frozen
+            .resolve(&std::any::TypeId::of::<Database>())
+            .expect("registered before freeze")
+            .downcast::<Database>()
+            .unwrap();
+        assert_eq!(db.url, "debug://localhost");
+    }
+
+    #[cfg(feature = "perfect-hash")]
+    #[test]
     fn test_frozen_provided_transient_outlives_container() {
         let frozen = {
             let container = Container::new();

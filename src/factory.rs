@@ -323,12 +323,24 @@ impl AnyFactory {
         }
     }
 
+    /// Initialize a lazy factory and return it as a singleton holding the
+    /// (shared) instance; other factories are returned unchanged.
+    pub(crate) fn into_initialized(self) -> Self {
+        match self {
+            AnyFactory::Lazy(f) => AnyFactory::Singleton(SingletonFactory {
+                instance: f.resolve(),
+            }),
+            other => other,
+        }
+    }
+
     /// Resolve, deferring lazy initialization (see [`Resolution`]).
     ///
     /// Transient factories run here, in place: deferring them would cost an
     /// extra refcount round-trip on every resolution. Storage holds only a
-    /// shard *read* guard while they run. DashMap 6.2's lock admits readers
-    /// unless a writer *holds* it (a waiting writer does not block them), so
+    /// shard *read* guard while they run. dashmap 6.1-6.2's `RawRwLock`
+    /// admits readers unless a writer *holds* it (a waiting writer does not
+    /// block them; this is an implementation detail, not dashmap API), so
     /// a transient factory may resolve services but must not register,
     /// remove or clear them in the same container, directly or indirectly
     /// (see `Container::transient`). The reader-admission behaviour is

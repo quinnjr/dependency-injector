@@ -447,10 +447,17 @@ impl FrozenStorage {
     /// enabling O(1) lookups without hash collisions.
     pub(crate) fn from_storage(storage: &Arc<ServiceStorage>) -> Self {
         // Collect all entries as owned values
+        // Clone under the iterator's shard guards (cheap, no user code), then
+        // initialize lazy services once the guards are gone, so the frozen
+        // storage is a snapshot and no initializer runs under a lock.
         let entries: Vec<(TypeId, AnyFactory)> = storage
             .factories
             .iter()
             .map(|r| (*r.key(), r.value().clone()))
+            .collect();
+        let entries: Vec<(TypeId, AnyFactory)> = entries
+            .into_iter()
+            .map(|(type_id, factory)| (type_id, factory.into_initialized()))
             .collect();
 
         let n = entries.len();

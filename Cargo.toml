@@ -99,6 +99,9 @@ ffi = []
 
 [dependencies]
 # Lock-free concurrent hashmap - much faster than RwLock<HashMap>
+# Transient factories rely on its RawRwLock admitting readers while a writer
+# waits (see AnyFactory::resolve_ready); test_transient_reads_while_another_
+# thread_writes guards that if this requirement is bumped.
 dashmap = "6"
 
 # Faster hashing for TypeId keys

@@ -401,8 +401,9 @@ impl Container {
     ///
     /// The factory is called once on first access, then the instance is cached.
     ///
-    /// The factory may register, remove or clear services in this container,
-    /// except when it is first resolved from inside a transient factory (see
+    /// The factory may register, remove or clear services in this container
+    /// (registration still panics once the container is locked), except when
+    /// it is first resolved from inside a transient factory (see
     /// [`Container::transient`]). It must not resolve its own type, directly
     /// or through a dependency cycle: that blocks forever.
     ///
@@ -453,7 +454,9 @@ impl Container {
     /// runs while the storage holds a read lock, so writing to the same
     /// container deadlocks. "Indirectly" includes a lazy service the factory
     /// resolves for the first time (its initializer runs inside the factory)
-    /// and the `Drop` of any service the factory releases.
+    /// and the `Drop` of any service the factory releases, including services
+    /// of *any* container that a resolution inside the factory evicts from
+    /// this thread's hot cache.
     ///
     /// # Examples
     ///
@@ -921,10 +924,10 @@ impl Container {
     ///
     /// Note: This also locks the container to prevent further registrations.
     ///
-    /// Lazy services are shared with the container rather than initialized
-    /// at freeze time: whichever side resolves one first creates the single
-    /// instance both observe. The frozen storage keeps the container's
-    /// services alive after the container itself is dropped.
+    /// Lazy services are initialized during the freeze (after the storage's
+    /// locks are released), so the frozen storage is a snapshot: later
+    /// `remove`/`clear` calls on the container do not affect it. It also
+    /// keeps the container's services alive after the container is dropped.
     ///
     /// # Example
     ///
@@ -1675,20 +1678,34 @@ mod tests {
     #[test]
     #[cfg_attr(miri, ignore = "slow under Miri; covers dashmap lock fairness, not UB")]
     fn test_transient_reads_while_another_thread_writes() {
+        use std::cell::Cell;
         use std::sync::atomic::AtomicBool;
 
         // Transient factories run under a shard read guard and may resolve
         // from the same container. That relies on DashMap admitting a reader
-        // while a writer is merely *waiting*; with a writer-preferring lock
-        // the nested `get` below would deadlock against the writer thread.
+        // while a writer is merely *waiting*. Here the outer guard, the
+        // writer and the nested reader all use the u64 shard, so a
+        // writer-preferring lock deadlocks on every run.
         static TARGET: std::sync::OnceLock<Container> = std::sync::OnceLock::new();
+        thread_local! {
+            static NESTED: Cell<bool> = const { Cell::new(false) };
+        }
+
+        fn make() -> u64 {
+            if NESTED.with(Cell::get) {
+                return 7;
+            }
+            NESTED.with(|n| n.set(true));
+            std::thread::yield_now();
+            // Re-enters the same shard while the outer read guard is held.
+            let value = *TARGET.get().unwrap().get::<u64>().unwrap();
+            NESTED.with(|n| n.set(false));
+            value
+        }
+
         let container = TARGET.get_or_init(|| {
             let c = Container::new();
-            c.singleton(7u32);
-            c.transient(|| {
-                std::thread::yield_now();
-                u64::from(*TARGET.get().unwrap().get::<u32>().unwrap())
-            });
+            c.transient(make);
             c
         });
 
@@ -1696,11 +1713,9 @@ mod tests {
         let writer = {
             let stop = Arc::clone(&stop);
             std::thread::spawn(move || {
-                // Re-registering u32 write-locks the exact shard the nested
-                // `get` reads, and bumps the generation so that `get` misses
-                // the hot cache and really takes the shard lock.
+                // Re-registering u64 write-locks the shard the reader holds.
                 while !stop.load(Ordering::Relaxed) {
-                    TARGET.get().unwrap().singleton(7u32);
+                    TARGET.get().unwrap().transient(make);
                 }
             })
         };
