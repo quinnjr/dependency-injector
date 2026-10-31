@@ -398,8 +398,10 @@ jobs:
       - uses: actions/checkout@v6
 
       - name: Install Rust toolchain
-        # Pinned so a new Miri check (e.g. on a dependency) cannot turn
-        # this gating job red without a code change; bump deliberately.
+        # The toolchain is pinned so a new Miri release cannot turn this
+        # gating job red on its own; bump deliberately. Dependencies still
+        # float (Cargo.lock is not committed), so a dependency release that
+        # Miri rejects can still fail it.
         uses: dtolnay/rust-toolchain@master
         with:
           toolchain: nightly-2026-10-19

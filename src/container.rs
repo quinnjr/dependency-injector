@@ -132,15 +132,35 @@ impl HotCache {
     /// Hash a TypeId for slot selection only (never used as a type check).
     ///
     /// Goes through `TypeId: Hash` because `TypeId`'s layout is unspecified.
+    /// Uses a trivial multiply-xor hasher rather than ahash so the result
+    /// folds to a constant per `T` on every target (ahash's AES path, e.g.
+    /// with `-Ctarget-cpu=native`, does not), keeping cache hits free of
+    /// hashing work. `slot_for` mixes the result further.
     #[inline(always)]
     fn type_hash<T: 'static>() -> u64 {
-        ahash::RandomState::with_seeds(
-            0x243f_6a88_85a3_08d3,
-            0x1319_8a2e_0370_7344,
-            0xa409_3822_299f_31d0,
-            0x082e_fa98_ec4e_6c89,
-        )
-        .hash_one(TypeId::of::<T>())
+        use std::hash::{Hash, Hasher};
+
+        struct SlotHasher(u64);
+        impl Hasher for SlotHasher {
+            #[inline(always)]
+            fn finish(&self) -> u64 {
+                self.0
+            }
+            #[inline(always)]
+            fn write(&mut self, bytes: &[u8]) {
+                for &byte in bytes {
+                    self.write_u64(u64::from(byte));
+                }
+            }
+            #[inline(always)]
+            fn write_u64(&mut self, value: u64) {
+                self.0 = (self.0 ^ value).wrapping_mul(0x9e37_79b9_7f4a_7c15);
+            }
+        }
+
+        let mut hasher = SlotHasher(0x243f_6a88_85a3_08d3);
+        TypeId::of::<T>().hash(&mut hasher);
+        hasher.finish()
     }
 
     /// Calculate slot index for type `T` in a given storage
