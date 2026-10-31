@@ -1,0 +1,6 @@
+# Reading a `TypeId` through `transmute_copy` relies on its unspecified layout
+# and caused the hot cache type confusion in #58; compare or hash `TypeId`
+# through its own `Eq`/`Hash` instead.
+disallowed-methods = [
+    { path = "std::mem::transmute_copy", reason = "TypeId layout is unspecified (#58); use TypeId's Eq/Hash" },
+]

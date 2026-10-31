@@ -110,7 +110,7 @@
 
       <h3 id="performance-tools">Performance Tools</h3>
       <ul class="feature-list">
-        <li><strong><code>ScopePool</code></strong> - Pre-allocates reusable request scopes; <code>acquire()</code> hands out a scope that is cleared and returned to the pool when dropped (~20ns per reuse vs ~134ns for a fresh scope)</li>
+        <li><strong><code>ScopePool</code></strong> - Pre-allocates reusable request scopes; <code>acquire()</code> hands out a scope that is cleared and returned to the pool when dropped (~65-70ns per acquire/release cycle vs ~134ns for a fresh scope); a scope that is still referenced elsewhere when released (e.g. a clone that outlived the request) is discarded instead, so it never leaks data into the next request</li>
         <li><strong><code>warm_cache::&lt;T&gt;()</code> / <code>clear_cache()</code></strong> - Pre-populate or release the thread-local hot cache for services resolved on the hot path</li>
         <li><strong><code>lock()</code> / <code>freeze()</code></strong> - <code>lock()</code> forbids registrations after startup; with the <code>perfect-hash</code> feature, <code>freeze()</code> additionally snapshots the container into a <code>FrozenStorage</code> backed by a minimal perfect hash function for collision-free O(1) lookups</li>
       </ul>

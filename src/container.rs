@@ -1372,16 +1372,16 @@ use std::sync::Mutex;
 /// scope is discarded instead and the pool shrinks until it creates a new
 /// one. Services the releasing thread resolved directly from the scope are
 /// evicted from its cache first; services cached by other threads, or cached
-/// for the scope's child scopes, still count as holding it. (If `Drop` impls keep re-registering a service that holds the scope
-/// itself beyond a few clears, the discarded scope leaks through that
-/// cycle.)
+/// for the scope's child scopes, still count as holding it. (If `Drop` impls
+/// keep re-registering a service that holds the scope itself beyond a few
+/// clears, the discarded scope leaks through that cycle.)
 ///
 /// # Performance
 ///
 /// - First acquisition: ~134ns (creates new scope if pool is empty)
-/// - Subsequent acquisitions: ~20ns (reuses pooled scope)
-/// - Release: ~15-20ns (clears, verifies the scope is unshared, and returns
-///   it to the pool)
+/// - Reusing a pooled scope: ~65-70ns per acquire + release cycle
+///   (`scope_pool_acquire` benchmark); release clears the scope and verifies
+///   it is unshared before returning it to the pool
 pub struct ScopePool {
     /// Parent storage to create scopes from
     parent_storage: Arc<ServiceStorage>,
@@ -1728,6 +1728,62 @@ mod tests {
         assert_eq!(resolves_on_drop_drops(), 0);
         Container::new().clear_cache();
         assert_eq!(resolves_on_drop_drops(), 1);
+    }
+
+    #[test]
+    fn test_pool_release_evicted_service_drop_can_resolve_services() {
+        reentry_target();
+        let root = Container::new();
+        let pool = ScopePool::new(&root, 1);
+        let before = resolves_on_drop_drops();
+        {
+            let scope = pool.acquire();
+            scope.singleton(ResolvesOnDrop);
+            let _ = scope.get::<ResolvesOnDrop>().unwrap();
+            // Only this thread's hot cache holds the service now.
+            assert!(scope.remove::<ResolvesOnDrop>());
+            assert_eq!(resolves_on_drop_drops(), before);
+        }
+        // Release evicted it; its Drop re-entered the cache, which Miri
+        // flags if that happens while the eviction still borrows it.
+        assert_eq!(resolves_on_drop_drops(), before + 1);
+    }
+
+    #[test]
+    fn test_clear_from_drop_at_thread_exit() {
+        use std::sync::atomic::AtomicUsize;
+
+        static TARGET: std::sync::OnceLock<Container> = std::sync::OnceLock::new();
+        static DROPS: AtomicUsize = AtomicUsize::new(0);
+
+        struct ClearsOnDrop;
+        impl Drop for ClearsOnDrop {
+            fn drop(&mut self) {
+                // Non-empty, so `clear` reaches its thread-local scratch
+                // buffer, which is already destroyed at this point.
+                TARGET.get().unwrap().clear();
+                DROPS.fetch_add(1, Ordering::SeqCst);
+            }
+        }
+
+        let target = TARGET.get_or_init(Container::new);
+        target.singleton(1u8);
+        std::thread::spawn(|| {
+            let container = Container::new();
+            container.singleton(ClearsOnDrop);
+            // Register the hot cache's thread-local first and the clear
+            // scratch buffer second; destructors run in reverse, so the
+            // scratch buffer is gone when the cache drops the service.
+            let _ = container.get::<ClearsOnDrop>().unwrap();
+            let other = Container::new();
+            other.singleton(1u8);
+            other.clear();
+            drop(container);
+        })
+        .join()
+        .unwrap();
+        assert_eq!(DROPS.load(Ordering::SeqCst), 1);
+        assert!(TARGET.get().unwrap().is_empty());
     }
 
     #[test]
