@@ -181,8 +181,9 @@ fn cache_get<T: Injectable>(storage_ptr: usize, generation: u64) -> Option<Arc<T
     HOT_CACHE
         .try_with(|cell| {
             // SAFETY: the thread-local is only accessed from this thread, and
-            // no `&mut` to it is live: the mutable borrows in `cache_service`
-            // and `cache_clear` end before any user code can run. `get` only
+            // no `&mut` to it is live: the mutable borrows in `cache_service`,
+            // `cache_clear` and `cache_evict_storage` end before any user code
+            // can run. `get` only
             // clones an Arc, so no user code runs during this borrow either.
             let cache = unsafe { &*cell.get() };
             cache.get::<T>(storage_ptr, generation)
@@ -1087,6 +1088,7 @@ impl Container {
     /// Uses relaxed ordering for fast path - we only need eventual consistency
     /// since registration is not a hot path and locking is rare.
     #[inline]
+    #[track_caller]
     fn check_not_locked(&self) {
         if self.locked.load(Ordering::Relaxed) {
             panic!("Cannot register services: container is locked");
@@ -1361,13 +1363,16 @@ use std::sync::Mutex;
 /// }
 /// ```
 ///
+/// Releasing a scope always clears it, so child scopes created from a pooled
+/// scope stop resolving its services once it is released.
+///
 /// A released scope is only returned to the pool if nothing else can still
 /// write to it: if a clone of the scope (or a service holding one) outlives
 /// the request, or services' `Drop` impls keep registering into it, the
 /// scope is discarded instead and the pool shrinks until it creates a new
-/// one. Services cached by the releasing thread are evicted first, but ones
-/// cached by other threads that resolved from the scope still count as
-/// holding it. (If `Drop` impls keep re-registering a service that holds the scope
+/// one. Services the releasing thread resolved directly from the scope are
+/// evicted from its cache first; services cached by other threads, or cached
+/// for the scope's child scopes, still count as holding it. (If `Drop` impls keep re-registering a service that holds the scope
 /// itself beyond a few clears, the discarded scope leaks through that
 /// cycle.)
 ///
@@ -1533,6 +1538,9 @@ impl ScopePool {
         // exists, and its Acquire synchronizes with every other handle's
         // release, so registrations made through those handles before they
         // were dropped are visible to the check below.
+        // (`inserted_since` only matters for a registration racing the final
+        // clear from another thread, which then drops its handle before
+        // `get_mut`; that interleaving is not reproducible in a unit test.)
         if Arc::get_mut(&mut storage).is_none() || storage.inserted_since(insertions) {
             return;
         }
@@ -1786,6 +1794,44 @@ mod tests {
             });
             container.get::<Registers>().unwrap();
             assert!(container.is_empty());
+        });
+    }
+
+    #[test]
+    fn test_lazy_resolved_through_child_runs_outside_parent_locks() {
+        static ROOT: std::sync::OnceLock<Container> = std::sync::OnceLock::new();
+
+        struct L;
+
+        // Resolving through a child walks the parent chain (`resolve`, not
+        // `get_with_transient_flag`); `clear` write-locks every shard, so
+        // it deadlocks if the initializer runs under the parent's guard.
+        fail_on_deadlock("lazy initializer ran under a parent shard guard", || {
+            let root = ROOT.get_or_init(Container::new);
+            root.lazy(|| {
+                ROOT.get().unwrap().clear();
+                L
+            });
+            root.scope().get::<L>().unwrap();
+        });
+    }
+
+    #[cfg(feature = "perfect-hash")]
+    #[test]
+    fn test_freeze_initializes_lazies_outside_storage_locks() {
+        static ROOT: std::sync::OnceLock<Container> = std::sync::OnceLock::new();
+
+        struct L;
+
+        // `freeze` initializes lazies; `clear` write-locks every shard, so
+        // it deadlocks if that happens while iterating the storage.
+        fail_on_deadlock("freeze initialized a lazy under shard guards", || {
+            let root = ROOT.get_or_init(Container::new);
+            root.lazy(|| {
+                ROOT.get().unwrap().clear();
+                L
+            });
+            let _frozen = root.freeze();
         });
     }
 
