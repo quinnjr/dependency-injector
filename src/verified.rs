@@ -233,8 +233,9 @@ pub trait ServiceProvider {
     /// Register a service as transient.
     ///
     /// A new instance is created on every resolution. As with
-    /// [`Container::transient`], `T::create` must not register, remove or
-    /// clear services in this container.
+    /// [`Container::transient`], creating `T` (including resolving its
+    /// dependencies) must not register, remove or clear services in this
+    /// container, directly or indirectly.
     fn provide_transient<T: Service>(&self);
 }
 

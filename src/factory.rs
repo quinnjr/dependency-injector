@@ -327,9 +327,12 @@ impl AnyFactory {
     ///
     /// Transient factories run here, in place: deferring them would cost an
     /// extra refcount round-trip on every resolution. Storage holds only a
-    /// shard *read* guard while they run, and DashMap's lock admits readers
-    /// unless a writer holds it, so a transient factory may resolve services
-    /// but must not register, remove or clear them in the same container.
+    /// shard *read* guard while they run. DashMap 6.2's lock admits readers
+    /// unless a writer *holds* it (a waiting writer does not block them), so
+    /// a transient factory may resolve services but must not register,
+    /// remove or clear them in the same container, directly or indirectly
+    /// (see `Container::transient`). The reader-admission behaviour is
+    /// covered by `test_transient_reads_while_another_thread_writes`.
     #[inline]
     pub(crate) fn resolve_ready(&self) -> Resolution {
         match self {

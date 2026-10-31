@@ -401,6 +401,11 @@ impl Container {
     ///
     /// The factory is called once on first access, then the instance is cached.
     ///
+    /// The factory may register, remove or clear services in this container,
+    /// except when it is first resolved from inside a transient factory (see
+    /// [`Container::transient`]). It must not resolve its own type, directly
+    /// or through a dependency cycle: that blocks forever.
+    ///
     /// # Examples
     ///
     /// ```rust
@@ -444,9 +449,11 @@ impl Container {
     /// A new instance is created on every resolve.
     ///
     /// The factory may resolve services from this container, but must not
-    /// register, remove or clear services in it: it runs while the storage
-    /// holds a read lock, so writing to the same container deadlocks. Lazy
-    /// factories ([`Container::lazy`]) have no such restriction.
+    /// register, remove or clear services in it, directly or indirectly: it
+    /// runs while the storage holds a read lock, so writing to the same
+    /// container deadlocks. "Indirectly" includes a lazy service the factory
+    /// resolves for the first time (its initializer runs inside the factory)
+    /// and the `Drop` of any service the factory releases.
     ///
     /// # Examples
     ///
@@ -1163,6 +1170,8 @@ impl<'a> BatchBuilder<'a> {
     }
 
     /// Register a transient and continue the chain
+    ///
+    /// See [`Container::transient`] for what the factory must not do.
     #[inline]
     pub fn transient<T: Injectable, F>(self, factory: F) -> Self
     where
@@ -1217,6 +1226,8 @@ impl<'a> BatchRegistrar<'a> {
     }
 
     /// Register a transient service (inserted immediately)
+    ///
+    /// See [`Container::transient`] for what the factory must not do.
     #[inline]
     pub fn transient<T: Injectable, F>(&self, factory: F)
     where
@@ -1659,6 +1670,45 @@ mod tests {
         });
         container.get::<Registers>().unwrap();
         assert!(container.is_empty());
+    }
+
+    #[test]
+    #[cfg_attr(miri, ignore = "slow under Miri; covers dashmap lock fairness, not UB")]
+    fn test_transient_reads_while_another_thread_writes() {
+        use std::sync::atomic::AtomicBool;
+
+        // Transient factories run under a shard read guard and may resolve
+        // from the same container. That relies on DashMap admitting a reader
+        // while a writer is merely *waiting*; with a writer-preferring lock
+        // the nested `get` below would deadlock against the writer thread.
+        static TARGET: std::sync::OnceLock<Container> = std::sync::OnceLock::new();
+        let container = TARGET.get_or_init(|| {
+            let c = Container::new();
+            c.singleton(7u32);
+            c.transient(|| {
+                std::thread::yield_now();
+                u64::from(*TARGET.get().unwrap().get::<u32>().unwrap())
+            });
+            c
+        });
+
+        let stop = Arc::new(AtomicBool::new(false));
+        let writer = {
+            let stop = Arc::clone(&stop);
+            std::thread::spawn(move || {
+                // Re-registering u32 write-locks the exact shard the nested
+                // `get` reads, and bumps the generation so that `get` misses
+                // the hot cache and really takes the shard lock.
+                while !stop.load(Ordering::Relaxed) {
+                    TARGET.get().unwrap().singleton(7u32);
+                }
+            })
+        };
+        for _ in 0..100_000 {
+            assert_eq!(*container.get::<u64>().unwrap(), 7);
+        }
+        stop.store(true, Ordering::Relaxed);
+        writer.join().unwrap();
     }
 
     #[test]

@@ -87,6 +87,9 @@ pub(crate) unsafe fn downcast_arc_unchecked<T: Send + Sync + 'static>(
     unsafe { Arc::from_raw(ptr as *const T) }
 }
 
+/// Largest `CLEAR_SCRATCH` buffer kept for reuse.
+const CLEAR_SCRATCH_MAX_CAPACITY: usize = 64;
+
 thread_local! {
     /// Reusable buffer for `ServiceStorage::clear` (see there).
     static CLEAR_SCRATCH: Cell<Vec<AnyFactory>> = const { Cell::new(Vec::new()) };
@@ -222,12 +225,16 @@ impl ServiceStorage {
     pub fn get_with_transient_flag<T: Send + Sync + 'static>(&self) -> Option<(Arc<T>, bool)> {
         let type_id = TypeId::of::<T>();
         // The guard is dropped at the end of this block, before any lazy
-        // initializer runs (see `resolve`).
-        let (resolution, is_transient) = {
+        // initializer runs (see `resolve`). Transients are matched first to
+        // keep their path free of the `Resolution` round-trip.
+        let (service, is_transient) = {
             let factory = self.factories.get(&type_id)?;
-            (factory.resolve_ready(), factory.is_transient())
+            match &*factory {
+                AnyFactory::Transient(f) => (Resolution::Ready(f.create()), true),
+                other => (other.resolve_ready(), false),
+            }
         };
-        let service = match resolution {
+        let service = match service {
             Resolution::Ready(service) => service,
             Resolution::Deferred(factory) => factory.resolve(),
         };
@@ -337,7 +344,11 @@ impl ServiceStorage {
         if let Some(mut removed) = removed {
             // Drops services; a re-entrant `clear` takes a fresh buffer.
             removed.clear();
-            let _ = CLEAR_SCRATCH.try_with(|scratch| scratch.set(removed));
+            // Keep only small buffers so one large clear does not pin memory
+            // for the rest of the thread's life.
+            if removed.capacity() <= CLEAR_SCRATCH_MAX_CAPACITY {
+                let _ = CLEAR_SCRATCH.try_with(|scratch| scratch.set(removed));
+            }
         }
     }
 

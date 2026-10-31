@@ -154,6 +154,8 @@ impl ScopedContainer {
     }
 
     /// Register a transient service in this scope.
+    ///
+    /// See [`crate::Container::transient`] for what the factory must not do.
     #[inline]
     pub fn transient<T: Injectable, F>(&self, factory: F)
     where
@@ -312,6 +314,8 @@ impl ScopeBuilder {
     }
 
     /// Add a transient factory.
+    ///
+    /// See [`crate::Container::transient`] for what the factory must not do.
     pub fn with_transient<T, F>(mut self, factory: F) -> Self
     where
         T: Injectable,
