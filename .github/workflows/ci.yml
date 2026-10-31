@@ -145,6 +145,15 @@ jobs:
       - name: Test all features
         run: cargo test --all-features
 
+      # Transient factories rely on dashmap's lock admitting readers while a
+      # writer waits, which is an implementation detail; check the newest
+      # semver-compatible dashmap so a release that changes it is caught here
+      # rather than by downstream users (who resolve dashmap themselves).
+      - name: Test transient re-entrancy against latest dashmap
+        run: |
+          cargo update -p dashmap
+          cargo test --lib -- test_transient_reads_while_another_thread_writes
+
   doc:
     name: Documentation
     runs-on: ubuntu-latest

@@ -1915,7 +1915,7 @@ mod tests {
     }
 
     #[test]
-    fn test_pool_does_not_reuse_scope_still_referenced_after_release() {
+    fn test_pool_release_clears_writes_from_evicted_service_drop() {
         struct Marker;
         struct RegistersOnDrop(Container);
         impl Drop for RegistersOnDrop {
@@ -1929,16 +1929,31 @@ mod tests {
         {
             let scope = pool.acquire();
             scope.singleton(RegistersOnDrop(scope.clone()));
-            // The hot cache now holds the service (and its scope clone), so
-            // `clear` on release does not drop it.
+            // The hot cache now holds the service (and its scope clone).
             let _ = scope.get::<RegistersOnDrop>().unwrap();
         }
+        // Release evicted the cached service, whose Drop wrote Marker into
+        // the scope; release cleared that again before pooling the scope.
+        assert_eq!(pool.available_count(), 1);
         let scope = pool.acquire();
-        // Release evicts the cached service, whose Drop writes Marker into
-        // the released scope; release must clear that before any reuse, and
-        // no later eviction may write into the scope serving this request.
-        scope.clear_cache();
         assert!(!scope.contains::<Marker>());
+    }
+
+    #[test]
+    fn test_pool_never_reuses_scope_with_escaped_clone() {
+        struct Marker;
+
+        let root = Container::new();
+        let pool = ScopePool::new(&root, 1);
+        // A clone of the scope outlives the request.
+        let leaked = {
+            let scope = pool.acquire();
+            scope.clone()
+        };
+        assert_eq!(pool.available_count(), 0);
+        let next = pool.acquire();
+        leaked.singleton(Marker);
+        assert!(!next.contains::<Marker>());
     }
 
     #[test]

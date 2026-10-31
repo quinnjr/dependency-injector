@@ -100,10 +100,10 @@ ffi = []
 [dependencies]
 # Lock-free concurrent hashmap - much faster than RwLock<HashMap>
 # Transient factories rely on its RawRwLock admitting readers while a writer
-# waits (true from 5.5 through 6.2; see AnyFactory::resolve_ready), so the
-# upper bound is pinned: re-run this test before raising it:
-# test_transient_reads_while_another_thread_writes
-dashmap = ">=6.0, <6.3"
+# waits (true from 5.5 through 6.2; see AnyFactory::resolve_ready). CI runs
+# test_transient_reads_while_another_thread_writes against the newest 6.x
+# (rather than capping the version, which would break downstream resolution).
+dashmap = "6"
 
 # Faster hashing for TypeId keys
 ahash = "0.8"

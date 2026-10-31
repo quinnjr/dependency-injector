@@ -42,8 +42,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   scope only if no other handle to it exists (checked with `Arc::get_mut`,
   which synchronizes with other handles' drops) and nothing was registered
   since it was cleared (tracked by a per-storage insertion counter);
-  otherwise the scope is discarded. These checks add roughly 6-12ns to a pooled
-  acquire/release cycle, and the counter about 3ns to each registration.
+  otherwise the scope is discarded. Release first evicts the releasing
+  thread's hot-cache entries for the scope, so those services' `Drop` runs
+  during release; services cached by other threads still keep the scope
+  from being reused. These checks add roughly 6-12ns to a pooled
+  acquire/release cycle, and the counter about 3ns to each registration. A
+  request that resolves services from its scope pays roughly another 10ns at
+  release, where its cached services are now dropped (previously that
+  happened at some later cache eviction).
 - **Lazy initializers could deadlock on their own container**: they ran
   while a DashMap shard read guard was held, so one that registered, removed
   or cleared services in the same container deadlocked (as did `freeze`,
