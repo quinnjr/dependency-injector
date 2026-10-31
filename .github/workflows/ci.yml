@@ -2,9 +2,9 @@ name: CI
 
 on:
   push:
-    branches: [main, master]
+    branches: [main, master, develop]
   pull_request:
-    branches: [main, master]
+    branches: [main, master, develop]
 
 env:
   CARGO_TERM_COLOR: always
@@ -392,20 +392,25 @@ jobs:
     name: Miri
     runs-on: ubuntu-latest
     timeout-minutes: 30
-    # informative for now — tighten to gating once the unsafe surface is miri-clean
-    continue-on-error: true
+    # Gating: the hot cache's re-entrancy and aliasing fixes are only
+    # observable as UB, so Miri is what catches a regression in them.
     steps:
       - uses: actions/checkout@v6
 
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@nightly
+        # The toolchain is pinned so a new Miri release cannot turn this
+        # gating job red on its own; bump deliberately. Dependencies still
+        # float (Cargo.lock is not committed), so a dependency release that
+        # Miri rejects can still fail it.
+        uses: dtolnay/rust-toolchain@master
         with:
+          toolchain: nightly-2026-10-19
           components: miri
 
       - name: Run miri
         env:
           MIRIFLAGS: -Zmiri-disable-isolation
-        run: cargo +nightly miri test --lib
+        run: cargo +nightly-2026-10-19 miri test --lib --all-features
 
   lint-ci:
     name: Lint CI Config

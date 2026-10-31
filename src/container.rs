@@ -22,14 +22,16 @@ use tracing::{debug, trace};
 /// 4 slots keeps the cache compact (a few cache lines) and provides good hit
 /// rates for typical apps.
 const HOT_CACHE_SLOTS: usize = 4;
+// `slot_for` keeps the top log2(HOT_CACHE_SLOTS) bits of a 64-bit product.
+const _: () = assert!(HOT_CACHE_SLOTS.is_power_of_two() && HOT_CACHE_SLOTS > 1);
 
 /// A cached service entry
 ///
-/// Phase 13 optimization: Stores pre-computed u64 hash instead of TypeId
-/// to avoid transmute on every comparison.
+/// The full `TypeId` is stored and compared exactly: slot collisions are
+/// expected, so this check is what guarantees the unchecked downcast is sound.
 struct CacheEntry {
-    /// Pre-computed hash of TypeId (avoids transmute on lookup)
-    type_hash: u64,
+    /// Exact type of the cached service
+    type_id: TypeId,
     /// Pointer to the storage this was resolved from (for scope identity)
     storage_ptr: usize,
     /// Storage generation at the time of caching (for staleness detection).
@@ -57,24 +59,24 @@ impl HotCache {
 
     /// Get a cached service if present for a specific container
     ///
-    /// Phase 12+13 optimization: Uses UnsafeCell (no RefCell borrow check)
-    /// and pre-computed type_hash (no transmute on lookup).
+    /// Phase 12 optimization: Uses UnsafeCell (no RefCell borrow check).
     ///
     /// The entry only hits if its generation matches the storage's current
     /// generation, so entries cached before a mutation are never returned.
     #[inline(always)]
     fn get<T: Send + Sync + 'static>(&self, storage_ptr: usize, generation: u64) -> Option<Arc<T>> {
-        let type_hash = Self::type_hash::<T>();
-        let slot = Self::slot_for_hash(type_hash, storage_ptr);
+        let type_id = TypeId::of::<T>();
+        let slot = Self::slot_for::<T>(storage_ptr);
 
         if let Some(entry) = &self.entries[slot] {
-            // Phase 13: Compare u64 hash directly (faster than TypeId comparison)
-            if entry.type_hash == type_hash
+            if entry.type_id == type_id
                 && entry.storage_ptr == storage_ptr
                 && entry.generation == generation
             {
-                // Cache hit - clone and downcast (unchecked since type_hash matches)
-                // SAFETY: We verified type_hash matches, so the Arc contains type T
+                // Cache hit - clone and downcast (unchecked since TypeId matches)
+                // SAFETY: entry.type_id == TypeId::of::<T>(), and `insert` is
+                // generic over T and stores `TypeId::of::<T>()` alongside an
+                // `Arc<T>`, so the Arc contains T.
                 let arc = entry.service.clone();
                 return Some(unsafe { downcast_arc_unchecked(arc) });
             }
@@ -82,44 +84,97 @@ impl HotCache {
         None
     }
 
-    /// Insert a service into the cache for a specific container
+    /// Insert a service into the cache for a specific container.
+    ///
+    /// Returns the evicted entry instead of dropping it: dropping a service
+    /// can run user `Drop` code that re-enters the cache, so the caller must
+    /// drop it after the mutable borrow has ended.
     #[inline]
-    fn insert<T: Injectable>(&mut self, storage_ptr: usize, generation: u64, service: Arc<T>) {
-        let type_hash = Self::type_hash::<T>();
-        let slot = Self::slot_for_hash(type_hash, storage_ptr);
+    #[must_use = "drop the evicted entry outside the hot cache borrow"]
+    fn insert<T: Injectable>(
+        &mut self,
+        storage_ptr: usize,
+        generation: u64,
+        service: Arc<T>,
+    ) -> Option<CacheEntry> {
+        let slot = Self::slot_for::<T>(storage_ptr);
 
-        self.entries[slot] = Some(CacheEntry {
-            type_hash,
+        self.entries[slot].replace(CacheEntry {
+            type_id: TypeId::of::<T>(),
             storage_ptr,
             generation,
             service: service as Arc<dyn Any + Send + Sync>,
-        });
+        })
     }
 
-    /// Clear the cache (call when container is modified)
+    /// Clear the cache, returning the old entries for the caller to drop
+    /// outside the mutable borrow (see [`HotCache::insert`]).
     #[inline]
-    fn clear(&mut self) {
-        self.entries = [const { None }; HOT_CACHE_SLOTS];
+    #[must_use = "drop the evicted entries outside the hot cache borrow"]
+    fn clear(&mut self) -> [Option<CacheEntry>; HOT_CACHE_SLOTS] {
+        std::mem::replace(&mut self.entries, [const { None }; HOT_CACHE_SLOTS])
     }
 
-    /// Extract u64 hash from TypeId (computed once per type at compile time via monomorphization)
+    /// Remove the entries cached for one storage, returning them for the
+    /// caller to drop outside the mutable borrow (see [`HotCache::insert`]).
+    #[inline]
+    #[must_use = "drop the evicted entries outside the hot cache borrow"]
+    fn evict_storage(&mut self, storage_ptr: usize) -> [Option<CacheEntry>; HOT_CACHE_SLOTS] {
+        let mut evicted = [const { None }; HOT_CACHE_SLOTS];
+        for (slot, out) in self.entries.iter_mut().zip(&mut evicted) {
+            if slot.as_ref().is_some_and(|e| e.storage_ptr == storage_ptr) {
+                *out = slot.take();
+            }
+        }
+        evicted
+    }
+
+    /// Hash a TypeId for slot selection only (never used as a type check).
+    ///
+    /// Goes through `TypeId: Hash` because `TypeId`'s layout is unspecified.
+    /// Uses a trivial multiply-xor hasher rather than ahash so the result
+    /// folds to a constant per `T` on every target (ahash's AES path, e.g.
+    /// with `-Ctarget-cpu=native`, does not), keeping cache hits free of
+    /// hashing work. `slot_for` mixes the result further.
     #[inline(always)]
     fn type_hash<T: 'static>() -> u64 {
-        let type_id = TypeId::of::<T>();
-        // SAFETY: TypeId is #[repr(transparent)] wrapper around u128
-        unsafe { std::mem::transmute_copy(&type_id) }
+        use std::hash::{Hash, Hasher};
+
+        struct SlotHasher(u64);
+        impl Hasher for SlotHasher {
+            #[inline(always)]
+            fn finish(&self) -> u64 {
+                self.0
+            }
+            #[inline(always)]
+            fn write(&mut self, bytes: &[u8]) {
+                for &byte in bytes {
+                    self.write_u64(u64::from(byte));
+                }
+            }
+            #[inline(always)]
+            fn write_u64(&mut self, value: u64) {
+                self.0 = (self.0 ^ value).wrapping_mul(0x9e37_79b9_7f4a_7c15);
+            }
+        }
+
+        let mut hasher = SlotHasher(0x243f_6a88_85a3_08d3);
+        TypeId::of::<T>().hash(&mut hasher);
+        hasher.finish()
     }
 
-    /// Calculate slot index from pre-computed type hash and storage pointer
+    /// Calculate slot index for type `T` in a given storage
     #[inline(always)]
-    fn slot_for_hash(type_hash: u64, storage_ptr: usize) -> usize {
+    fn slot_for<T: 'static>(storage_ptr: usize) -> usize {
         // Fast bit mixing: XOR with rotated storage_ptr for good distribution
-        let mixed = type_hash ^ (storage_ptr as u64).rotate_left(32);
+        let mixed = Self::type_hash::<T>() ^ (storage_ptr as u64).rotate_left(32);
 
-        // Use golden ratio multiplication for final mixing (fast & good distribution)
+        // Fibonacci hashing: multiply by the golden ratio and keep the TOP
+        // bits, which depend on every input bit (the low bits of a product
+        // depend only on the low bits of its operands).
         let slot = mixed.wrapping_mul(0x9e3779b97f4a7c15);
 
-        (slot as usize) & (HOT_CACHE_SLOTS - 1)
+        (slot >> (u64::BITS - HOT_CACHE_SLOTS.trailing_zeros())) as usize
     }
 }
 
@@ -132,35 +187,107 @@ thread_local! {
     static HOT_CACHE: UnsafeCell<HotCache> = const { UnsafeCell::new(HotCache::new()) };
 }
 
-/// Helper to access the hot cache without RefCell overhead
-///
-/// SAFETY: thread_local! guarantees single-threaded access, so we can use
-/// UnsafeCell without data races. We ensure no aliasing by limiting access
-/// to immutable borrows for reads and brief mutable borrows for writes.
+// Hot cache access. These three functions are the only code that borrows the
+// `UnsafeCell<HotCache>`, and none of them runs user code while the borrow is
+// live: lookups only clone an `Arc`, and insert/clear move evicted entries out
+// and drop them after the borrow ends (a service's `Drop` may re-enter the
+// cache). `try_with` makes access during thread-local teardown a cache miss
+// instead of a panic, since services dropped by the cache's own destructor
+// may still resolve other services.
+
+/// Look up `T` in the calling thread's hot cache.
 #[inline(always)]
-fn with_hot_cache<F, R>(f: F) -> R
-where
-    F: FnOnce(&HotCache) -> R,
-{
-    HOT_CACHE.with(|cell| {
-        // SAFETY: thread_local guarantees single-threaded access
-        let cache = unsafe { &*cell.get() };
-        f(cache)
-    })
+fn cache_get<T: Injectable>(storage_ptr: usize, generation: u64) -> Option<Arc<T>> {
+    HOT_CACHE
+        .try_with(|cell| {
+            // SAFETY: the thread-local is only accessed from this thread, and
+            // no `&mut` to it is live: the mutable borrows in `cache_service`,
+            // `cache_clear` and `cache_evict_storage_slow` end before any user
+            // code can run. `get` only
+            // clones an Arc, so no user code runs during this borrow either.
+            let cache = unsafe { &*cell.get() };
+            cache.get::<T>(storage_ptr, generation)
+        })
+        .ok()
+        .flatten()
 }
 
-/// Helper to mutably access the hot cache
-#[inline(always)]
-fn with_hot_cache_mut<F, R>(f: F) -> R
-where
-    F: FnOnce(&mut HotCache) -> R,
-{
-    HOT_CACHE.with(|cell| {
-        // SAFETY: thread_local guarantees single-threaded access
+/// Insert a resolved service into the hot cache, dropping any evicted entry
+/// after the cache borrow ends.
+///
+/// Kept out of line so this cache-miss-only code stays out of `get()`.
+#[inline(never)]
+fn cache_service<T: Injectable>(storage_ptr: usize, generation: u64, service: Arc<T>) {
+    let evicted = HOT_CACHE.try_with(|cell| {
+        // SAFETY: single-threaded access (thread-local), and no other borrow
+        // is live because user code never runs while one is held. `insert`
+        // only moves values; the evicted entry is dropped below, after this
+        // borrow ends.
         let cache = unsafe { &mut *cell.get() };
-        f(cache)
-    })
+        cache.insert(storage_ptr, generation, service)
+    });
+    drop(evicted);
 }
+
+/// Clear the calling thread's hot cache, dropping the entries after the
+/// cache borrow ends.
+#[inline]
+fn cache_clear() {
+    let evicted = HOT_CACHE.try_with(|cell| {
+        // SAFETY: as in `cache_service`; `clear` only moves the entries out.
+        let cache = unsafe { &mut *cell.get() };
+        cache.clear()
+    });
+    drop(evicted);
+}
+
+/// Drop the calling thread's hot-cache entries for one storage, after the
+/// cache borrow ends.
+///
+/// Dropping an evicted service may resolve (and so re-cache) another service
+/// of the same storage, so the slow path evicts twice; whatever its second
+/// pass's drops cache in turn is left to the caller (`ScopePool::release`
+/// then sees the storage as shared and discards it).
+#[inline]
+fn cache_evict_storage(storage_ptr: usize) {
+    let any_cached = HOT_CACHE.try_with(|cell| {
+        // SAFETY: as in `cache_get`; this only reads the entries.
+        let cache = unsafe { &*cell.get() };
+        (cache.entries.iter().flatten()).any(|e| e.storage_ptr == storage_ptr)
+    });
+    // Usually nothing matches; keep the eviction itself out of line.
+    if any_cached == Ok(true) {
+        cache_evict_storage_slow(storage_ptr);
+    }
+}
+
+#[cold]
+#[inline(never)]
+fn cache_evict_storage_slow(storage_ptr: usize) {
+    let evict = || {
+        let evicted = HOT_CACHE.try_with(|cell| {
+            // SAFETY: as in `cache_service`; `evict_storage` only moves
+            // entries, which are dropped after this borrow ends.
+            let cache = unsafe { &mut *cell.get() };
+            cache.evict_storage(storage_ptr)
+        });
+        drop(evicted);
+    };
+    evict();
+    // Only pay for a second pass if those drops re-cached something.
+    let recached = HOT_CACHE.try_with(|cell| {
+        // SAFETY: as in `cache_get`; this only reads the entries.
+        let cache = unsafe { &*cell.get() };
+        (cache.entries.iter().flatten()).any(|e| e.storage_ptr == storage_ptr)
+    });
+    if recached == Ok(true) {
+        evict();
+    }
+}
+
+/// How many extra clears `ScopePool::release` attempts when services' `Drop`
+/// impls keep registering into the scope being released.
+const RELEASE_CLEAR_ATTEMPTS: usize = 4;
 
 /// High-performance dependency injection container.
 ///
@@ -192,6 +319,52 @@ pub struct Container {
     locked: Arc<AtomicBool>,
     /// Scope depth for debugging
     depth: u32,
+}
+
+/// Non-owning handle to a [`Container`], for factories that need to resolve
+/// from the container that owns them without creating an `Arc` cycle.
+#[derive(Clone)]
+pub(crate) struct WeakContainer {
+    storage: std::sync::Weak<ServiceStorage>,
+    parent_storage: Option<Arc<ServiceStorage>>,
+    locked: Arc<AtomicBool>,
+    depth: u32,
+}
+
+impl WeakContainer {
+    /// Run `f` with the container, or return `None` if its storage has been
+    /// dropped.
+    ///
+    /// Only the storage's strong count is touched (one upgrade and one
+    /// release): `provide_transient` factories call this on every
+    /// resolution, and cloning every handle into a fresh `Container` would
+    /// add shared-refcount traffic that scales badly across threads.
+    #[inline]
+    pub(crate) fn with<R>(&self, f: impl FnOnce(&Container) -> R) -> Option<R> {
+        // Dropped normally (also on unwind), releasing the upgrade.
+        let storage = self.storage.upgrade()?;
+        // SAFETY: the fields are bitwise copies of `Arc`s that stay alive for
+        // the whole call: `storage` above, and `self`'s `parent_storage` and
+        // `locked`, which `&self` borrows. `Arc` has no uniqueness
+        // requirement, so duplicating its pointer is fine as long as the
+        // copies are never dropped, which `ManuallyDrop` ensures (no count is
+        // decremented without a matching increment). This relies on:
+        // - every `Container` field being an `Arc`, `Option<Arc>` or `Copy`
+        //   value (a `Box` copied bitwise would break uniqueness);
+        // - no field allowing `&Container` to replace or drop what it holds
+        //   (no `ArcSwap`/`Mutex<Arc<_>>`), and no code moving out of a
+        //   `&Container`, since `f` only ever gets `&Container`.
+        // Adding a field breaks the struct literal below, prompting a recheck.
+        let container = std::mem::ManuallyDrop::new(unsafe {
+            Container {
+                storage: std::ptr::read(&raw const storage),
+                parent_storage: std::ptr::read(&raw const self.parent_storage),
+                locked: std::ptr::read(&raw const self.locked),
+                depth: self.depth,
+            }
+        });
+        Some(f(&container))
+    }
 }
 
 impl Container {
@@ -334,6 +507,13 @@ impl Container {
     ///
     /// The factory is called once on first access, then the instance is cached.
     ///
+    /// The factory runs without holding any storage lock, so it may register,
+    /// remove or clear services in this container (registration still panics
+    /// once the container is locked), unless any transient factory, in any
+    /// container, resolves this service directly or through dependencies:
+    /// see [`Container::transient`]. It must not resolve its own type,
+    /// directly or through a dependency cycle: that blocks forever.
+    ///
     /// # Examples
     ///
     /// ```rust
@@ -375,6 +555,20 @@ impl Container {
     /// Register a transient service.
     ///
     /// A new instance is created on every resolve.
+    ///
+    /// The factory runs while this container's storage holds a read lock.
+    /// It may resolve services, but nothing it runs or waits on may register,
+    /// remove or clear services in **any** container: a write to this
+    /// container waits for the read lock forever, and a write to another
+    /// container can deadlock against that container's own transient
+    /// factories. "Runs or waits on" includes:
+    ///
+    /// - the factory's own code;
+    /// - initializers of lazy services it resolves, whether they run inside
+    ///   the factory or on another thread the factory waits for;
+    /// - `Drop` of services it releases, including services of any container
+    ///   that a resolution inside the factory evicts from this thread's hot
+    ///   cache.
     ///
     /// # Examples
     ///
@@ -442,8 +636,21 @@ impl Container {
     }
 
     /// Register by TypeId directly (advanced use).
+    ///
+    /// # Panics
+    ///
+    /// Panics if `instance`'s concrete type does not match `type_id`, or if
+    /// the container is locked.
     #[inline]
+    #[track_caller]
     pub fn register_by_id(&self, type_id: TypeId, instance: Arc<dyn Any + Send + Sync>) {
+        // Resolution downcasts without re-checking the type, so the TypeId
+        // must describe the instance exactly. Note `(*instance)`: calling
+        // `type_id()` on the Arc itself would yield the Arc's TypeId.
+        assert!(
+            (*instance).type_id() == type_id,
+            "register_by_id: instance's concrete type does not match type_id"
+        );
         self.check_not_locked();
 
         // Phase 2: Use the singleton factory with pre-erased Arc directly
@@ -490,7 +697,7 @@ impl Container {
 
         // Phase 5+12: Check thread-local hot cache first (UnsafeCell, no RefCell overhead)
         // Note: Transients won't be in cache, so they'll fall through to get_and_cache
-        if let Some(cached) = with_hot_cache(|cache| cache.get::<T>(storage_ptr, generation)) {
+        if let Some(cached) = cache_get::<T>(storage_ptr, generation) {
             #[cfg(feature = "logging")]
             trace!(
                 target: "dependency_injector",
@@ -539,9 +746,7 @@ impl Container {
 
             // Cache non-transient services (transients create new instances each time)
             if !is_transient {
-                with_hot_cache_mut(|cache| {
-                    cache.insert(storage_ptr, generation, Arc::clone(&service));
-                });
+                cache_service(storage_ptr, generation, Arc::clone(&service));
             }
 
             return Ok(service);
@@ -636,7 +841,7 @@ impl Container {
     /// entries cached for other containers.
     #[inline]
     pub fn clear_cache(&self) {
-        with_hot_cache_mut(HotCache::clear);
+        cache_clear();
     }
 
     /// Pre-warm the thread-local cache with a specific service type.
@@ -832,6 +1037,19 @@ impl Container {
     ///
     /// Note: This also locks the container to prevent further registrations.
     ///
+    /// Singleton and lazy services are snapshotted: lazies are initialized
+    /// during the freeze (after the storage's locks are released), and later
+    /// `remove`/`clear` calls on the container do not affect them. Transient
+    /// factories are shared with the container, so a transient that resolves
+    /// dependencies from it (e.g. one registered with `provide_transient`)
+    /// sees later `remove`/`clear` calls and panics if a dependency is gone
+    /// (`provide_transient` factories expect their dependencies to resolve).
+    /// Each frozen level that contains transient factories keeps its source
+    /// storage (and that storage's ancestors) alive after the container is
+    /// dropped, so do not register such a frozen storage into one of those
+    /// ancestors: that forms a cycle and leaks both. (The container itself is
+    /// locked by `freeze`, so registering into it panics.)
+    ///
     /// # Example
     ///
     /// ```rust,ignore
@@ -847,7 +1065,18 @@ impl Container {
     #[inline]
     pub fn freeze(&self) -> crate::storage::FrozenStorage {
         self.lock();
-        crate::storage::FrozenStorage::from_storage(&self.storage)
+        crate::storage::FrozenStorage::freeze(&self.storage)
+    }
+
+    /// Create a non-owning handle to this container.
+    #[inline]
+    pub(crate) fn downgrade(&self) -> WeakContainer {
+        WeakContainer {
+            storage: Arc::downgrade(&self.storage),
+            parent_storage: self.parent_storage.clone(),
+            locked: Arc::clone(&self.locked),
+            depth: self.depth,
+        }
     }
 
     /// Clear all services from this scope.
@@ -909,6 +1138,7 @@ impl Container {
     /// Uses relaxed ordering for fast path - we only need eventual consistency
     /// since registration is not a hot path and locking is rare.
     #[inline]
+    #[track_caller]
     fn check_not_locked(&self) {
         if self.locked.load(Ordering::Relaxed) {
             panic!("Cannot register services: container is locked");
@@ -1065,6 +1295,8 @@ impl<'a> BatchBuilder<'a> {
     }
 
     /// Register a transient and continue the chain
+    ///
+    /// See [`Container::transient`] for what the factory must not do.
     #[inline]
     pub fn transient<T: Injectable, F>(self, factory: F) -> Self
     where
@@ -1119,6 +1351,8 @@ impl<'a> BatchRegistrar<'a> {
     }
 
     /// Register a transient service (inserted immediately)
+    ///
+    /// See [`Container::transient`] for what the factory must not do.
     #[inline]
     pub fn transient<T: Injectable, F>(&self, factory: F)
     where
@@ -1179,11 +1413,26 @@ use std::sync::Mutex;
 /// }
 /// ```
 ///
+/// Releasing a scope always clears it, so child scopes created from a pooled
+/// scope stop resolving its services once it is released.
+///
+/// A released scope is only returned to the pool if nothing else can still
+/// write to it: if a clone of the scope (or a service holding one) outlives
+/// the request, or services' `Drop` impls keep registering into it, the
+/// scope is discarded instead and the pool shrinks until it creates a new
+/// one. Services the releasing thread resolved directly from the scope are
+/// evicted from its cache first; services cached by other threads (or for
+/// the scope's child scopes) that hold a handle to the scope still count as
+/// holding it. (If `Drop` impls
+/// keep re-registering a service that holds the scope itself beyond a few
+/// clears, the discarded scope leaks through that cycle.)
+///
 /// # Performance
 ///
 /// - First acquisition: ~134ns (creates new scope if pool is empty)
-/// - Subsequent acquisitions: ~20ns (reuses pooled scope)
-/// - Release: ~10ns (clears and returns to pool)
+/// - Reusing a pooled scope: ~65-70ns per acquire + release cycle
+///   (`scope_pool_acquire` benchmark); release clears the scope and verifies
+///   it is unshared before returning it to the pool
 pub struct ScopePool {
     /// Parent storage to create scopes from
     parent_storage: Arc<ServiceStorage>,
@@ -1308,18 +1557,52 @@ impl ScopePool {
     /// Return a scope to the pool (internal use).
     #[inline]
     fn release(&self, container: Container) {
+        let Container {
+            mut storage,
+            locked,
+            ..
+        } = container;
+        // Services this thread resolved from the scope are still held by its
+        // hot cache, possibly with clones of the scope; drop them first (their
+        // `Drop` may still write to the scope, which the clear below handles)
+        // so they do not keep the scope from being reused.
+        cache_evict_storage(Arc::as_ptr(&storage) as usize);
         // Clear storage for reuse (parent reference is preserved). The clear
         // stamps a fresh generation, invalidating hot cache entries for this
-        // scope (including lingering clones of the container).
-        container.storage.clear();
+        // scope (including lingering clones of the container). A service's
+        // `Drop` may register into the scope while it is cleared (possibly
+        // something holding the scope itself, which would leak it if left
+        // behind), so clear again a bounded number of times. This runs even
+        // if the scope is then discarded, to break such cycles.
+        let mut cleared = storage.clear();
+        for _ in 0..RELEASE_CLEAR_ATTEMPTS {
+            if cleared.is_some() {
+                break;
+            }
+            cleared = storage.clear();
+        }
+        let Some(insertions) = cleared else {
+            return;
+        };
+        // Only reuse a scope nothing else can still write to. `get_mut`
+        // succeeds only if this is the sole strong handle and no weak handle
+        // exists, and its Acquire synchronizes with every other handle's
+        // release, so registrations made through those handles before they
+        // were dropped are visible to the check below.
+        // (`inserted_since` only matters for a registration racing the final
+        // clear from another thread, which then drops its handle before
+        // `get_mut`; that interleaving is not reproducible in a unit test.)
+        if Arc::get_mut(&mut storage).is_none() || storage.inserted_since(insertions) {
+            return;
+        }
         // Reset lock state
-        container.locked.store(false, Ordering::Relaxed);
+        locked.store(false, Ordering::Relaxed);
 
         // Return to pool
-        self.available.lock().unwrap().push(ScopeSlot {
-            storage: container.storage,
-            locked: container.locked,
-        });
+        self.available
+            .lock()
+            .unwrap()
+            .push(ScopeSlot { storage, locked });
 
         #[cfg(feature = "logging")]
         trace!(
@@ -1390,13 +1673,13 @@ impl std::fmt::Debug for Container {
 // Thread Safety
 // =========================================================================
 
-// Container is Send + Sync because:
-// - storage is Arc<ServiceStorage>, which uses DashMap (thread-safe)
-// - parent_storage is Option<Arc<ServiceStorage>> (Send + Sync)
-// - locked is Arc<AtomicBool> (Send + Sync)
-// - depth is a plain u32 (trivially Send + Sync)
-unsafe impl Send for Container {}
-unsafe impl Sync for Container {}
+// Container is Send + Sync because every field is (Arc<ServiceStorage> over
+// DashMap, Arc<AtomicBool>, u32). Checked at compile time rather than asserted
+// with `unsafe impl`, so a future non-thread-safe field fails to build.
+const _: () = {
+    const fn assert_send_sync<T: Send + Sync>() {}
+    assert_send_sync::<Container>();
+};
 
 #[cfg(test)]
 mod tests {
@@ -1411,6 +1694,542 @@ mod tests {
     #[derive(Clone)]
     struct AnotherService {
         name: String,
+    }
+
+    #[test]
+    fn test_hot_cache_rejects_wrong_type_in_colliding_slot() {
+        let storage_ptr = 0x1000;
+        let generation = 7;
+        let mut cache = HotCache::new();
+        let _ = cache.insert(storage_ptr, generation, Arc::new(42u64));
+
+        // Simulate a slot collision: put the u64 entry where u32 would look.
+        let from = HotCache::slot_for::<u64>(storage_ptr);
+        let to = HotCache::slot_for::<u32>(storage_ptr);
+        let entry = cache.entries[from].take();
+        cache.entries[to] = entry;
+
+        assert!(cache.get::<u32>(storage_ptr, generation).is_none());
+        cache.entries.swap(from, to);
+        assert_eq!(*cache.get::<u64>(storage_ptr, generation).unwrap(), 42);
+    }
+
+    #[test]
+    #[should_panic(expected = "does not match type_id")]
+    fn test_register_by_id_rejects_mismatched_type() {
+        let container = Container::new();
+        container.register_by_id(TypeId::of::<String>(), Arc::new(7u8));
+    }
+
+    #[test]
+    fn test_register_by_id_accepts_matching_type() {
+        let container = Container::new();
+        container.register_by_id(TypeId::of::<u8>(), Arc::new(7u8));
+        assert_eq!(*container.get::<u8>().unwrap(), 7);
+    }
+
+    /// A container shared by the re-entrancy tests, resolved from `Drop`.
+    fn reentry_target() -> &'static Container {
+        static OTHER: std::sync::OnceLock<Container> = std::sync::OnceLock::new();
+        OTHER.get_or_init(|| {
+            let c = Container::new();
+            c.singleton(5u16);
+            c
+        })
+    }
+
+    /// Resolves from another container (re-entering the hot cache) on drop.
+    struct ResolvesOnDrop;
+    impl Drop for ResolvesOnDrop {
+        fn drop(&mut self) {
+            assert_eq!(*reentry_target().get::<u16>().unwrap(), 5);
+            let _ = RESOLVES_ON_DROP_DROPS.try_with(|n| n.set(n.get() + 1));
+        }
+    }
+
+    thread_local! {
+        /// Per-thread count of `ResolvesOnDrop` drops (tests run in parallel).
+        static RESOLVES_ON_DROP_DROPS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    }
+
+    fn resolves_on_drop_drops() -> usize {
+        RESOLVES_ON_DROP_DROPS.with(std::cell::Cell::get)
+    }
+
+    #[test]
+    fn test_hot_cache_slot_uses_low_pointer_bits() {
+        // Containers allocated near each other differ in low address bits;
+        // they must not all map a type to the same slot.
+        let slots: std::collections::HashSet<usize> = (0..64usize)
+            .map(|i| HotCache::slot_for::<u8>(0x1000 + i * 64))
+            .collect();
+        assert!(slots.len() > 1);
+    }
+
+    #[test]
+    fn test_evicted_service_drop_can_resolve_services() {
+        reentry_target();
+        let container = Container::new();
+        container.singleton(ResolvesOnDrop);
+        let _ = container.get::<ResolvesOnDrop>().unwrap();
+        drop(container);
+
+        // The hot cache now holds the last Arc<ResolvesOnDrop>; clearing it
+        // runs Drop, which must not observe a live mutable borrow.
+        assert_eq!(resolves_on_drop_drops(), 0);
+        Container::new().clear_cache();
+        assert_eq!(resolves_on_drop_drops(), 1);
+    }
+
+    #[test]
+    fn test_pool_reuses_scope_when_evicted_drop_recaches_scope_holder() {
+        struct Holder(#[allow(dead_code)] Container);
+        struct ResolvesHolderOnDrop(Container);
+        impl Drop for ResolvesHolderOnDrop {
+            fn drop(&mut self) {
+                // Re-caches Holder (which holds the scope) on this thread.
+                let _ = self.0.get::<Holder>();
+            }
+        }
+
+        let root = Container::new();
+        let pool = ScopePool::new(&root, 1);
+        for _ in 0..3 {
+            let scope = pool.acquire();
+            scope.singleton(Holder(scope.clone()));
+            scope.singleton(ResolvesHolderOnDrop(scope.clone()));
+            let _ = scope.get::<ResolvesHolderOnDrop>().unwrap();
+            // Only the hot cache holds it now; release evicts it.
+            assert!(scope.remove::<ResolvesHolderOnDrop>());
+        }
+        assert_eq!(pool.available_count(), 1);
+    }
+
+    #[test]
+    fn test_pool_discards_scope_registered_into_after_final_clear() {
+        struct Marker;
+        // Each drop registers the next link (holding the scope) until the
+        // last registers Marker, which holds no handle, after the final
+        // clear: only the insertion checks keep that scope out of the pool.
+        struct Link(Container, usize);
+        impl Drop for Link {
+            fn drop(&mut self) {
+                if self.1 == 0 {
+                    self.0.singleton(Marker);
+                } else {
+                    self.0.singleton(Link(self.0.clone(), self.1 - 1));
+                }
+            }
+        }
+
+        let root = Container::new();
+        let pool = ScopePool::new(&root, 1);
+        {
+            let scope = pool.acquire();
+            scope.singleton(Link(scope.clone(), RELEASE_CLEAR_ATTEMPTS));
+        }
+        assert!(!pool.acquire().contains::<Marker>());
+    }
+
+    #[test]
+    fn test_clear_cache_from_drop_at_thread_exit() {
+        use std::sync::atomic::AtomicUsize;
+
+        static DROPS: AtomicUsize = AtomicUsize::new(0);
+
+        struct ClearsCacheOnDrop;
+        impl Drop for ClearsCacheOnDrop {
+            fn drop(&mut self) {
+                // Runs from the hot cache's own thread-local destructor.
+                Container::new().clear_cache();
+                DROPS.fetch_add(1, Ordering::SeqCst);
+            }
+        }
+
+        std::thread::spawn(|| {
+            let container = Container::new();
+            container.singleton(ClearsCacheOnDrop);
+            let _ = container.get::<ClearsCacheOnDrop>().unwrap();
+            drop(container);
+        })
+        .join()
+        .unwrap();
+        assert_eq!(DROPS.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn test_pool_release_evicted_service_drop_can_resolve_services() {
+        reentry_target();
+        let root = Container::new();
+        let pool = ScopePool::new(&root, 1);
+        let before = resolves_on_drop_drops();
+        {
+            let scope = pool.acquire();
+            scope.singleton(ResolvesOnDrop);
+            let _ = scope.get::<ResolvesOnDrop>().unwrap();
+            // Only this thread's hot cache holds the service now.
+            assert!(scope.remove::<ResolvesOnDrop>());
+            assert_eq!(resolves_on_drop_drops(), before);
+        }
+        // Release evicted it; its Drop re-entered the cache, which Miri
+        // flags if that happens while the eviction still borrows it.
+        assert_eq!(resolves_on_drop_drops(), before + 1);
+    }
+
+    #[test]
+    fn test_clear_from_drop_at_thread_exit() {
+        use std::sync::atomic::AtomicUsize;
+
+        static TARGET: std::sync::OnceLock<Container> = std::sync::OnceLock::new();
+        static DROPS: AtomicUsize = AtomicUsize::new(0);
+
+        struct ClearsOnDrop;
+        impl Drop for ClearsOnDrop {
+            fn drop(&mut self) {
+                // Non-empty, so `clear` reaches its thread-local scratch
+                // buffer, which is already destroyed at this point.
+                TARGET.get().unwrap().clear();
+                DROPS.fetch_add(1, Ordering::SeqCst);
+            }
+        }
+
+        let target = TARGET.get_or_init(Container::new);
+        target.singleton(1u8);
+        std::thread::spawn(|| {
+            let container = Container::new();
+            container.singleton(ClearsOnDrop);
+            // Register the hot cache's thread-local first and the clear
+            // scratch buffer second; destructors run in reverse, so the
+            // scratch buffer is gone when the cache drops the service.
+            let _ = container.get::<ClearsOnDrop>().unwrap();
+            let other = Container::new();
+            other.singleton(1u8);
+            other.clear();
+            drop(container);
+        })
+        .join()
+        .unwrap();
+        assert_eq!(DROPS.load(Ordering::SeqCst), 1);
+        assert!(TARGET.get().unwrap().is_empty());
+    }
+
+    #[test]
+    fn test_service_evicted_by_insert_can_resolve_services() {
+        reentry_target();
+        cache_clear();
+        // Find a storage pointer where u8 lands in ResolvesOnDrop's slot.
+        let storage_ptr = (1..=4096usize)
+            .map(|i| i << 4)
+            .find(|&ptr| HotCache::slot_for::<u8>(ptr) == HotCache::slot_for::<ResolvesOnDrop>(ptr))
+            .expect("no storage pointer maps u8 into ResolvesOnDrop's slot");
+        cache_service(storage_ptr, 1, Arc::new(ResolvesOnDrop));
+
+        // Evicts ResolvesOnDrop, running its Drop from inside `cache_service`.
+        assert_eq!(resolves_on_drop_drops(), 0);
+        cache_service(storage_ptr, 1, Arc::new(1u8));
+        assert_eq!(resolves_on_drop_drops(), 1);
+        // (Not asserting u8 is cached: Drop's own cache insert may evict it.)
+        assert!(cache_get::<ResolvesOnDrop>(storage_ptr, 1).is_none());
+    }
+
+    #[test]
+    fn test_cached_service_drop_at_thread_exit_can_resolve_services() {
+        use std::sync::atomic::AtomicUsize;
+
+        static DROPS: AtomicUsize = AtomicUsize::new(0);
+
+        struct ResolvesAtThreadExit;
+        impl Drop for ResolvesAtThreadExit {
+            fn drop(&mut self) {
+                assert_eq!(*reentry_target().get::<u16>().unwrap(), 5);
+                DROPS.fetch_add(1, Ordering::SeqCst);
+            }
+        }
+
+        reentry_target();
+        std::thread::spawn(|| {
+            let container = Container::new();
+            container.singleton(ResolvesAtThreadExit);
+            let _ = container.get::<ResolvesAtThreadExit>().unwrap();
+            drop(container);
+            // The thread-local cache's destructor drops the last Arc, and the
+            // service resolves while the cache is being destroyed.
+        })
+        .join()
+        .unwrap();
+        assert_eq!(DROPS.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn test_factories_run_outside_storage_locks() {
+        static TARGET: std::sync::OnceLock<Container> = std::sync::OnceLock::new();
+
+        #[derive(Debug)]
+        struct Registers;
+
+        // `clear` write-locks every shard; it deadlocks if the lazy
+        // initializer runs while `get` still holds the shard's read guard.
+        fail_on_deadlock("lazy initializer ran under a shard read guard", || {
+            let container = TARGET.get_or_init(Container::new);
+            container.lazy(|| {
+                TARGET.get().unwrap().clear();
+                Registers
+            });
+            container.get::<Registers>().unwrap();
+            assert!(container.is_empty());
+        });
+    }
+
+    #[test]
+    fn test_lazy_resolved_through_child_runs_outside_parent_locks() {
+        static ROOT: std::sync::OnceLock<Container> = std::sync::OnceLock::new();
+
+        struct L;
+
+        // Resolving through a child walks the parent chain (`resolve`, not
+        // `get_with_transient_flag`); `clear` write-locks every shard, so
+        // it deadlocks if the initializer runs under the parent's guard.
+        fail_on_deadlock("lazy initializer ran under a parent shard guard", || {
+            let root = ROOT.get_or_init(Container::new);
+            root.lazy(|| {
+                ROOT.get().unwrap().clear();
+                L
+            });
+            root.scope().get::<L>().unwrap();
+        });
+    }
+
+    #[cfg(feature = "perfect-hash")]
+    #[test]
+    fn test_freeze_initializes_lazies_outside_storage_locks() {
+        static ROOT: std::sync::OnceLock<Container> = std::sync::OnceLock::new();
+
+        struct L;
+
+        // `freeze` initializes lazies; `clear` write-locks every shard, so
+        // it deadlocks if that happens while iterating the storage.
+        fail_on_deadlock("freeze initialized a lazy under shard guards", || {
+            let root = ROOT.get_or_init(Container::new);
+            root.lazy(|| {
+                ROOT.get().unwrap().clear();
+                L
+            });
+            let _frozen = root.freeze();
+        });
+    }
+
+    /// Run `f` on another thread, failing (instead of hanging the test run)
+    /// if it does not finish within a minute.
+    fn fail_on_deadlock(what: &str, f: impl FnOnce() + Send + 'static) {
+        let (done_tx, done_rx) = std::sync::mpsc::channel();
+        let worker = std::thread::spawn(move || {
+            f();
+            let _ = done_tx.send(());
+        });
+        match done_rx.recv_timeout(std::time::Duration::from_secs(60)) {
+            Ok(()) => worker.join().unwrap(),
+            // The worker panicked: re-raise its panic.
+            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+                std::panic::resume_unwind(worker.join().unwrap_err())
+            }
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => panic!("deadlock: {what}"),
+        }
+    }
+
+    #[test]
+    #[cfg_attr(miri, ignore = "slow under Miri; covers dashmap lock fairness, not UB")]
+    fn test_transient_reads_while_another_thread_writes() {
+        use std::cell::Cell;
+        use std::sync::atomic::AtomicBool;
+
+        struct StopOnDrop(Arc<AtomicBool>);
+        impl Drop for StopOnDrop {
+            fn drop(&mut self) {
+                self.0.store(true, Ordering::Relaxed);
+            }
+        }
+
+        // Transient factories run under a shard read guard and may resolve
+        // from the same container. That relies on DashMap admitting a reader
+        // while a writer is merely *waiting*. Here the outer guard, the
+        // writer and the nested reader all use the u64 shard, so a
+        // writer-preferring lock deadlocks on every run.
+        static TARGET: std::sync::OnceLock<Container> = std::sync::OnceLock::new();
+        thread_local! {
+            static NESTED: Cell<bool> = const { Cell::new(false) };
+        }
+
+        fn make() -> u64 {
+            if NESTED.with(Cell::get) {
+                return 7;
+            }
+            NESTED.with(|n| n.set(true));
+            std::thread::yield_now();
+            // Re-enters the same shard while the outer read guard is held.
+            let value = *TARGET.get().unwrap().get::<u64>().unwrap();
+            NESTED.with(|n| n.set(false));
+            value
+        }
+
+        let container = TARGET.get_or_init(|| {
+            let c = Container::new();
+            c.transient(make);
+            c
+        });
+
+        let stop = Arc::new(AtomicBool::new(false));
+        let writer = {
+            let stop = Arc::clone(&stop);
+            std::thread::spawn(move || {
+                // Re-registering u64 write-locks the shard the reader holds.
+                while !stop.load(Ordering::Relaxed) {
+                    TARGET.get().unwrap().transient(make);
+                }
+            })
+        };
+        // Stop the writer however the reader ends (pass, panic or timeout).
+        let _stop_writer = StopOnDrop(Arc::clone(&stop));
+        fail_on_deadlock(
+            "dashmap no longer admits readers while a writer waits; \
+             transient factories that resolve from their container can deadlock",
+            move || {
+                for _ in 0..100_000 {
+                    assert_eq!(*container.get::<u64>().unwrap(), 7);
+                }
+            },
+        );
+        drop(_stop_writer);
+        writer.join().unwrap();
+    }
+
+    #[test]
+    fn test_clear_drops_services_outside_storage_locks() {
+        static TARGET: std::sync::OnceLock<Container> = std::sync::OnceLock::new();
+
+        struct InspectsOnDrop;
+        impl Drop for InspectsOnDrop {
+            fn drop(&mut self) {
+                // `len` read-locks every shard; it deadlocks if `clear` still
+                // holds a write lock while dropping services.
+                let _ = TARGET.get().unwrap().len();
+            }
+        }
+
+        fail_on_deadlock("clear dropped services under a shard write lock", || {
+            let container = TARGET.get_or_init(Container::new);
+            container.singleton(InspectsOnDrop);
+            container.clear();
+            assert!(container.is_empty());
+        });
+    }
+
+    #[test]
+    fn test_pool_does_not_reuse_scope_written_during_release() {
+        struct Marker;
+        struct RegistersOnDrop(Container);
+        impl Drop for RegistersOnDrop {
+            fn drop(&mut self) {
+                self.0.singleton(Marker);
+            }
+        }
+
+        let root = Container::new();
+        let pool = ScopePool::new(&root, 1);
+        {
+            let scope = pool.acquire();
+            scope.singleton(RegistersOnDrop(scope.clone()));
+        }
+        let scope = pool.acquire();
+        assert!(!scope.contains::<Marker>());
+    }
+
+    #[test]
+    fn test_pool_release_clears_writes_from_evicted_service_drop() {
+        struct Marker;
+        struct RegistersOnDrop(Container);
+        impl Drop for RegistersOnDrop {
+            fn drop(&mut self) {
+                self.0.singleton(Marker);
+            }
+        }
+
+        let root = Container::new();
+        let pool = ScopePool::new(&root, 1);
+        {
+            let scope = pool.acquire();
+            scope.singleton(RegistersOnDrop(scope.clone()));
+            // The hot cache now holds the service (and its scope clone).
+            let _ = scope.get::<RegistersOnDrop>().unwrap();
+        }
+        // Release evicted the cached service, whose Drop wrote Marker into
+        // the scope; release cleared that again before pooling the scope.
+        assert_eq!(pool.available_count(), 1);
+        let scope = pool.acquire();
+        assert!(!scope.contains::<Marker>());
+    }
+
+    #[test]
+    fn test_pool_never_reuses_scope_with_escaped_clone() {
+        struct Marker;
+
+        let root = Container::new();
+        let pool = ScopePool::new(&root, 1);
+        // A clone of the scope outlives the request.
+        let leaked = {
+            let scope = pool.acquire();
+            scope.clone()
+        };
+        assert_eq!(pool.available_count(), 0);
+        let next = pool.acquire();
+        leaked.singleton(Marker);
+        assert!(!next.contains::<Marker>());
+    }
+
+    #[test]
+    fn test_pool_reuses_scope_after_resolving_self_holding_service() {
+        struct Holder(#[allow(dead_code)] Container);
+
+        let root = Container::new();
+        let pool = ScopePool::new(&root, 1);
+        for _ in 0..3 {
+            let scope = pool.acquire();
+            scope.singleton(Holder(scope.clone()));
+            // Caches the service (and its scope clone) on this thread.
+            let _ = scope.get::<Holder>().unwrap();
+        }
+        // The releasing thread's cache entries were evicted, so the scope
+        // was clean and unshared each time and went back to the pool.
+        assert_eq!(pool.available_count(), 1);
+    }
+
+    #[test]
+    fn test_pool_release_frees_self_referencing_registration_from_drop() {
+        use std::sync::atomic::AtomicUsize;
+
+        static HOLDER_DROPS: AtomicUsize = AtomicUsize::new(0);
+
+        struct Holder(#[allow(dead_code)] Container);
+        impl Drop for Holder {
+            fn drop(&mut self) {
+                HOLDER_DROPS.fetch_add(1, Ordering::SeqCst);
+            }
+        }
+        struct RegistersHolderOnDrop(Container);
+        impl Drop for RegistersHolderOnDrop {
+            fn drop(&mut self) {
+                self.0.singleton(Holder(self.0.clone()));
+            }
+        }
+
+        let root = Container::new();
+        let pool = ScopePool::new(&root, 1);
+        {
+            let scope = pool.acquire();
+            scope.singleton(RegistersHolderOnDrop(scope.clone()));
+        }
+        // Holder (which holds the scope) was registered during release; a
+        // second clear must drop it rather than leak the scope through it.
+        assert_eq!(HOLDER_DROPS.load(Ordering::SeqCst), 1);
     }
 
     #[test]
@@ -1874,6 +2693,10 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(
+        miri,
+        ignore = "parking_lot_core futex syscall is rejected by Miri's variadic arg check"
+    )]
     fn test_cross_thread_invalidation_monotonic() {
         // A reader must never observe an older value after a newer one:
         // the Release stores in ServiceStorage's mutators paired with the

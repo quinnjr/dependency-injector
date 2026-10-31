@@ -18,8 +18,10 @@ The library targets these performance goals:
 
 ### Thread-Local Hot Cache
 The container uses a thread-local hot cache for frequently accessed services:
-- 4-slot LRU cache per thread
-- Uses `u64` hash of `TypeId` for fast comparison
+- 4-slot direct-mapped cache per thread
+- Stores and compares the full `TypeId` exactly (never a truncated hash or a
+  transmute of `TypeId`, whose layout is unspecified); a hash of it only
+  selects the slot
 - Avoids `DashMap` lookup for cached services
 
 ### Avoid in Hot Paths

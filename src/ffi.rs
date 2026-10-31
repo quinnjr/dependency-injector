@@ -1054,6 +1054,10 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(
+        miri,
+        ignore = "parking_lot_core futex syscall is rejected by Miri's variadic arg check"
+    )]
     fn test_poisoned_lock_stays_usable() {
         // Every lock site recovers via `PoisonError::into_inner`. A regression
         // to `.unwrap()` at any of them would brick the container after one
@@ -1220,6 +1224,10 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(
+        miri,
+        ignore = "parking_lot_core futex syscall is rejected by Miri's variadic arg check"
+    )]
     fn test_concurrent_duplicate_registration() {
         // Regression test for the check-then-insert TOCTOU: registration is
         // atomic under a single write lock, so of N threads racing to
@@ -1278,6 +1286,10 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(
+        miri,
+        ignore = "parking_lot_core futex syscall is rejected by Miri's variadic arg check"
+    )]
     fn test_concurrent_lock_vs_registration() {
         // di_lock racing di_register_singleton: every registration attempt
         // must resolve cleanly to Ok (beat the lock) or Locked (lost to it),

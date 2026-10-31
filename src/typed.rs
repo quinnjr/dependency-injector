@@ -172,6 +172,8 @@ impl<R> TypedBuilder<R> {
     }
 
     /// Register a transient service.
+    ///
+    /// See [`crate::Container::transient`] for what the factory must not do.
     #[inline]
     pub fn transient<T: Injectable, F>(self, factory: F) -> TypedBuilder<Reg<T, R>>
     where

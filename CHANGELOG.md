@@ -5,6 +5,79 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Fixed
+- **Hot cache type confusion (#58)**: the thread-local hot cache validated
+  entries with a 64-bit value read out of `TypeId` via `transmute_copy`
+  before an unchecked downcast. `TypeId` is 128 bits with an unspecified
+  layout, so a collision would read one service type as another. Entries now
+  store the full `TypeId` and compare it exactly; a hash of it is used only
+  for slot selection. The `perfect-hash` storage's `TypeId` hashing no longer
+  transmutes either. Cache hits cost the same; a cache miss costs roughly 3ns
+  more and `clear_cache` roughly 5ns more (exact comparison, and evicted
+  entries dropped outside the borrow).
+- **`register_by_id` accepted mismatched types**: registering an instance
+  under a `TypeId` that did not describe its concrete type let `get::<T>()`
+  reinterpret it as `T` (undefined behaviour from safe code). It now panics
+  on a mismatch.
+- **Hot cache re-entrancy from `Drop`**: evicting or clearing a cached
+  service whose `Drop` resolved services ran that code while the cache was
+  mutably borrowed (aliasing UB, confirmed with Miri). Evicted entries are
+  now dropped after the borrow ends.
+- **Abort at thread exit**: a service whose `Drop` resolved services and was
+  released by the hot cache's thread-local destructor aborted the process
+  ("thread local panicked on drop"). Hot cache access during thread-local
+  teardown is now treated as a cache miss.
+- **`ServiceProvider::provide` / `provide_transient` leaked the container**:
+  the registered factory held a strong `Container` clone, forming an `Arc`
+  cycle that kept the storage and every service in it alive forever. The
+  factory now holds a weak handle; a `FrozenStorage` containing transient
+  factories keeps its source storage alive, so they keep working after the
+  container is dropped (they still resolve dependencies from the live
+  container). Each `provide_transient` resolution now upgrades that weak
+  handle, costing roughly 7-10ns per resolution in benchmarks.
+- **`ScopePool` could hand out a dirty scope**: a service whose `Drop`
+  registered into its scope during release, or a scope handle that outlived
+  the request (held by a cached service or another thread), could write into
+  the pooled scope while it served the next request. Release now reuses a
+  scope only if no other handle to it exists (checked with `Arc::get_mut`,
+  which synchronizes with other handles' drops) and nothing was registered
+  since it was cleared (tracked by a per-storage insertion counter); otherwise
+  the scope is discarded. Release first evicts the releasing thread's
+  hot-cache entries for the scope, so those services' `Drop` runs during
+  release; services cached by other threads that hold a handle to the scope
+  still keep it from being reused. These checks add roughly 6-12ns to a pooled
+  acquire/release cycle, and the counter about 3ns to each registration. A
+  request that resolves services from its scope pays roughly another 15-25ns
+  at release, where its cached services are now evicted and dropped
+  (previously that happened at some later cache eviction).
+- **Lazy initializers could deadlock on their own container**: they ran
+  while a DashMap shard read guard was held, so one that registered, removed
+  or cleared services in the same container deadlocked (as did `freeze`,
+  which forced lazy initialization while iterating the storage). They now
+  run after the guard is released. Transient factories still run under the
+  read guard to keep transient resolution fast, so nothing a transient
+  factory runs or waits on (including lazy initializers it resolves, on any
+  thread, and `Drop` of services it releases) may register, remove or clear
+  services in any container; that restriction is now documented on every
+  transient registration method.
+- **Hot cache slot selection ignored most input bits**: the slot came from
+  the low bits of a multiply, which depend only on two bits of the type hash
+  and bits 32-33 of the storage address, so nearby containers shared slots.
+  It now uses the product's top bits (Fibonacci hashing).
+- **`Container::clear` could deadlock**: services were dropped while DashMap
+  shard write locks were held, so a `Drop` that touched the same container
+  deadlocked. Services are now dropped after the locks are released
+  (`clear` costs roughly 8ns more as a result).
+
+### Deprecated
+- `FrozenStorage::from_storage` is deprecated in favour of
+  `Container::freeze`. Its parameter type is internal, so outside the crate
+  it was only callable with an inferred, empty storage
+  (`from_storage(&Default::default())`); it stays public so that still
+  compiles.
+
 ## [2.1.0] - 2026-07-27
 
 ### Added
