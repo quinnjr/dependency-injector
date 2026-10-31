@@ -15,7 +15,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   store the full `TypeId` and compare it exactly; a hash of it is used only
   for slot selection. The `perfect-hash` storage's `TypeId` hashing no longer
   transmutes either. Cache hits cost the same; a cache miss costs roughly 3ns
-  more and `clear_cache` roughly 4ns more (exact comparison, and evicted
+  more and `clear_cache` roughly 5ns more (exact comparison, and evicted
   entries dropped outside the borrow).
 - **`register_by_id` accepted mismatched types**: registering an instance
   under a `TypeId` that did not describe its concrete type let `get::<T>()`
