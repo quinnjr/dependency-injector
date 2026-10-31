@@ -288,11 +288,20 @@ impl ServiceStorage {
     }
 
     /// Clear all services (preserves parent reference)
+    ///
+    /// Services are dropped after their shard locks are released and the
+    /// generation is bumped, so a service's `Drop` may use this storage
+    /// (`DashMap::clear` would drop them under the write lock and deadlock).
     #[inline]
     pub fn clear(&self) {
-        self.factories.clear();
+        let keys: Vec<TypeId> = self.factories.iter().map(|entry| *entry.key()).collect();
+        let removed: Vec<_> = keys
+            .iter()
+            .filter_map(|key| self.factories.remove(key))
+            .collect();
         // Release: see `insert`.
         self.generation.store(next_generation(), Ordering::Release);
+        drop(removed);
     }
 
     /// Check if this storage has a parent

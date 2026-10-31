@@ -23,6 +23,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   service whose `Drop` resolved services ran that code while the cache was
   mutably borrowed (aliasing UB, confirmed with Miri). Evicted entries are
   now dropped after the borrow ends.
+- **Abort at thread exit**: a service whose `Drop` resolved services and was
+  released by the hot cache's thread-local destructor aborted the process
+  ("thread local panicked on drop"). Hot cache access during thread-local
+  teardown is now treated as a cache miss.
+- **`ServiceProvider::provide` / `provide_transient` leaked the container**:
+  the registered factory held a strong `Container` clone, forming an `Arc`
+  cycle that kept the storage and every service in it alive forever. The
+  factory now holds a weak handle.
+- **`Container::clear` could deadlock**: services were dropped while DashMap
+  shard write locks were held, so a `Drop` that touched the same container
+  deadlocked. Services are now dropped after the locks are released.
 
 ## [2.1.0] - 2026-07-27
 

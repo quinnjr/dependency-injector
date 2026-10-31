@@ -239,8 +239,13 @@ pub trait ServiceProvider {
 impl ServiceProvider for Container {
     #[inline]
     fn provide<T: Service>(&self) {
-        let container = self.clone();
+        // Weak: the factory is owned by this container's storage, so a strong
+        // handle would form an Arc cycle and leak the container.
+        let container = self.downgrade();
         self.lazy(move || {
+            let container = container
+                .upgrade()
+                .expect("container dropped while resolving a service");
             let deps = T::Dependencies::resolve(&container)
                 .expect("Failed to resolve dependencies for service");
             T::create(deps)
@@ -259,8 +264,13 @@ impl ServiceProvider for Container {
 
     #[inline]
     fn provide_transient<T: Service>(&self) {
-        let container = self.clone();
+        // Weak: the factory is owned by this container's storage, so a strong
+        // handle would form an Arc cycle and leak the container.
+        let container = self.downgrade();
         self.transient(move || {
+            let container = container
+                .upgrade()
+                .expect("container dropped while resolving a transient service");
             let deps = T::Dependencies::resolve(&container)
                 .expect("Failed to resolve dependencies for transient service");
             T::create(deps)
@@ -388,6 +398,37 @@ impl_dependency_info_tuple!(A, B, C, D, E, F);
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_provided_services_are_freed_with_container() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        static DROPPED: AtomicUsize = AtomicUsize::new(0);
+
+        struct Tracked;
+        impl Drop for Tracked {
+            fn drop(&mut self) {
+                DROPPED.fetch_add(1, Ordering::SeqCst);
+            }
+        }
+        impl Service for Tracked {
+            type Dependencies = ();
+            fn create(_: ()) -> Self {
+                Tracked
+            }
+        }
+
+        let container = Container::new();
+        container.provide::<Tracked>();
+        drop(container.get::<Tracked>().unwrap());
+        drop(container);
+        // The hot cache holds its own Arc to the resolved service.
+        Container::new().clear_cache();
+
+        // A factory holding a strong Container would keep the storage, and
+        // with it the service, alive forever.
+        assert_eq!(DROPPED.load(Ordering::SeqCst), 1);
+    }
 
     #[derive(Clone)]
     struct Config {
