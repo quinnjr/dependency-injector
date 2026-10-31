@@ -323,8 +323,13 @@ impl ServiceStorage {
     ///
     /// Not atomic with respect to concurrent registration: a service
     /// registered while `clear` runs may survive it.
+    ///
+    /// Returns `true` if nothing was registered after the services were
+    /// removed (e.g. by a service's `Drop`), i.e. the storage is empty unless
+    /// another thread registered concurrently. Checking the generation is
+    /// one atomic load, where `is_empty` would lock every shard.
     #[inline]
-    pub fn clear(&self) {
+    pub fn clear(&self) -> bool {
         // Move each factory out under the shard lock, leaving a `Vacant`
         // placeholder whose drop runs no user code; the real factories (and the
         // services they own) are dropped below, after the locks are gone.
@@ -340,7 +345,8 @@ impl ServiceStorage {
             false
         });
         // Release: see `insert`.
-        self.generation.store(next_generation(), Ordering::Release);
+        let cleared_generation = next_generation();
+        self.generation.store(cleared_generation, Ordering::Release);
         if let Some(mut removed) = removed {
             // Drops services; a re-entrant `clear` takes a fresh buffer.
             removed.clear();
@@ -350,6 +356,8 @@ impl ServiceStorage {
                 let _ = CLEAR_SCRATCH.try_with(|scratch| scratch.set(removed));
             }
         }
+        // Every registration stamps a new generation.
+        self.generation.load(Ordering::Acquire) == cleared_generation
     }
 
     /// Check if this storage has a parent

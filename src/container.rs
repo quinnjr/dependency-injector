@@ -206,6 +206,10 @@ fn cache_clear() {
     drop(evicted);
 }
 
+/// How many extra clears `ScopePool::release` attempts when services' `Drop`
+/// impls keep registering into the scope being released.
+const RELEASE_CLEAR_ATTEMPTS: usize = 4;
+
 /// High-performance dependency injection container.
 ///
 /// Uses lock-free data structures for maximum concurrent throughput.
@@ -262,11 +266,16 @@ impl WeakContainer {
         let storage = self.storage.upgrade()?;
         // SAFETY: the fields are bitwise copies of `Arc`s that stay alive for
         // the whole call: `storage` above, and `self`'s `parent_storage` and
-        // `locked`, which `&self` borrows. `ManuallyDrop` ensures the copies
-        // are never dropped, so no reference count is decremented without a
-        // matching increment. `Container` has no `Drop` impl, and `f` only
-        // gets a shared reference, so it cannot move the copies out (a
-        // `clone()` increments the counts as usual).
+        // `locked`, which `&self` borrows. `Arc` has no uniqueness
+        // requirement, so duplicating its pointer is fine as long as the
+        // copies are never dropped, which `ManuallyDrop` ensures (no count is
+        // decremented without a matching increment). This relies on:
+        // - every `Container` field being an `Arc`, `Option<Arc>` or `Copy`
+        //   value (a `Box` copied bitwise would break uniqueness);
+        // - no field allowing `&Container` to replace or drop what it holds
+        //   (no `ArcSwap`/`Mutex<Arc<_>>`), and no code moving out of a
+        //   `&Container`, since `f` only ever gets `&Container`.
+        // Adding a field breaks the struct literal below, prompting a recheck.
         let container = std::mem::ManuallyDrop::new(unsafe {
             Container {
                 storage: std::ptr::read(&raw const storage),
@@ -954,7 +963,8 @@ impl Container {
     /// `remove`/`clear` calls on the container do not affect them. Transient
     /// factories are shared with the container, so a transient that resolves
     /// dependencies from it (e.g. one registered with `provide_transient`)
-    /// sees later `remove`/`clear` calls and fails if a dependency is gone.
+    /// sees later `remove`/`clear` calls and panics if a dependency is gone
+    /// (`provide_transient` factories expect their dependencies to resolve).
     /// Each frozen level that contains transient factories keeps its source
     /// storage (and that storage's ancestors) alive after the container is
     /// dropped, so do not register such a frozen storage into one of those
@@ -1455,10 +1465,29 @@ impl ScopePool {
         // Clear storage for reuse (parent reference is preserved). The clear
         // stamps a fresh generation, invalidating hot cache entries for this
         // scope (including lingering clones of the container).
-        container.storage.clear();
-        // A service's `Drop` may have registered into the scope during the
-        // clear; such a scope is not clean, so let it go instead of reusing.
-        if !container.storage.is_empty() {
+        //
+        // `clear` reports whether anything was registered while it dropped
+        // the services; registrations from other threads are ruled out by
+        // the reference-count check below (nothing else holds the storage).
+        // A service's `Drop` may register into the scope during the clear
+        // (possibly something that holds the scope itself, which would leak
+        // it if left behind), so clear again a bounded number of times.
+        let mut empty = container.storage.clear();
+        for _ in 0..RELEASE_CLEAR_ATTEMPTS {
+            if empty {
+                break;
+            }
+            empty = container.storage.clear();
+        }
+        // Only reuse a scope nothing else can still write to: a service's
+        // `Drop` may have registered into it during the clear, and any other
+        // handle to its storage (a clone of the scope held by a service that
+        // is still cached or alive elsewhere, or a weak handle) could write
+        // into it later, while it serves another request.
+        if !empty
+            || Arc::strong_count(&container.storage) != 1
+            || Arc::weak_count(&container.storage) != 0
+        {
             return;
         }
         // Reset lock state
@@ -1738,6 +1767,13 @@ mod tests {
         use std::cell::Cell;
         use std::sync::atomic::AtomicBool;
 
+        struct StopOnDrop(Arc<AtomicBool>);
+        impl Drop for StopOnDrop {
+            fn drop(&mut self) {
+                self.0.store(true, Ordering::Relaxed);
+            }
+        }
+
         // Transient factories run under a shard read guard and may resolve
         // from the same container. That relies on DashMap admitting a reader
         // while a writer is merely *waiting*. Here the outer guard, the
@@ -1776,23 +1812,18 @@ mod tests {
                 }
             })
         };
-        // Read on a separate thread so a regression fails with a message
-        // instead of hanging the test run.
-        let (done_tx, done_rx) = std::sync::mpsc::channel();
-        let reader = std::thread::spawn(move || {
-            for _ in 0..100_000 {
-                assert_eq!(*container.get::<u64>().unwrap(), 7);
-            }
-            let _ = done_tx.send(());
-        });
-        let finished = done_rx.recv_timeout(std::time::Duration::from_secs(60));
-        stop.store(true, Ordering::Relaxed);
-        assert!(
-            finished.is_ok(),
+        // Stop the writer however the reader ends (pass, panic or timeout).
+        let _stop_writer = StopOnDrop(Arc::clone(&stop));
+        fail_on_deadlock(
             "dashmap no longer admits readers while a writer waits; \
-             transient factories that resolve from their container can deadlock"
+             transient factories that resolve from their container can deadlock",
+            move || {
+                for _ in 0..100_000 {
+                    assert_eq!(*container.get::<u64>().unwrap(), 7);
+                }
+            },
         );
-        reader.join().unwrap();
+        drop(_stop_writer);
         writer.join().unwrap();
     }
 
@@ -1835,6 +1866,62 @@ mod tests {
         }
         let scope = pool.acquire();
         assert!(!scope.contains::<Marker>());
+    }
+
+    #[test]
+    fn test_pool_does_not_reuse_scope_still_referenced_after_release() {
+        struct Marker;
+        struct RegistersOnDrop(Container);
+        impl Drop for RegistersOnDrop {
+            fn drop(&mut self) {
+                self.0.singleton(Marker);
+            }
+        }
+
+        let root = Container::new();
+        let pool = ScopePool::new(&root, 1);
+        {
+            let scope = pool.acquire();
+            scope.singleton(RegistersOnDrop(scope.clone()));
+            // The hot cache now holds the service (and its scope clone), so
+            // `clear` on release does not drop it.
+            let _ = scope.get::<RegistersOnDrop>().unwrap();
+        }
+        let scope = pool.acquire();
+        // Evicting the cached service runs its Drop, which writes to the
+        // released scope; that must not be the scope serving this request.
+        scope.clear_cache();
+        assert!(!scope.contains::<Marker>());
+    }
+
+    #[test]
+    fn test_pool_release_frees_self_referencing_registration_from_drop() {
+        use std::sync::atomic::AtomicUsize;
+
+        static HOLDER_DROPS: AtomicUsize = AtomicUsize::new(0);
+
+        struct Holder(#[allow(dead_code)] Container);
+        impl Drop for Holder {
+            fn drop(&mut self) {
+                HOLDER_DROPS.fetch_add(1, Ordering::SeqCst);
+            }
+        }
+        struct RegistersHolderOnDrop(Container);
+        impl Drop for RegistersHolderOnDrop {
+            fn drop(&mut self) {
+                self.0.singleton(Holder(self.0.clone()));
+            }
+        }
+
+        let root = Container::new();
+        let pool = ScopePool::new(&root, 1);
+        {
+            let scope = pool.acquire();
+            scope.singleton(RegistersHolderOnDrop(scope.clone()));
+        }
+        // Holder (which holds the scope) was registered during release; a
+        // second clear must drop it rather than leak the scope through it.
+        assert_eq!(HOLDER_DROPS.load(Ordering::SeqCst), 1);
     }
 
     #[test]
