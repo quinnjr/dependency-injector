@@ -182,6 +182,16 @@ where
     })
 }
 
+/// Insert a resolved service into the hot cache, dropping any evicted entry
+/// after the cache borrow ends.
+///
+/// Kept out of line so this cache-miss-only code stays out of `get()`.
+#[inline(never)]
+fn cache_service<T: Injectable>(storage_ptr: usize, generation: u64, service: Arc<T>) {
+    let evicted = with_hot_cache_mut(|cache| cache.insert(storage_ptr, generation, service));
+    drop(evicted);
+}
+
 /// High-performance dependency injection container.
 ///
 /// Uses lock-free data structures for maximum concurrent throughput.
@@ -571,10 +581,7 @@ impl Container {
 
             // Cache non-transient services (transients create new instances each time)
             if !is_transient {
-                let evicted = with_hot_cache_mut(|cache| {
-                    cache.insert(storage_ptr, generation, Arc::clone(&service))
-                });
-                drop(evicted);
+                cache_service(storage_ptr, generation, Arc::clone(&service));
             }
 
             return Ok(service);
