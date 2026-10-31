@@ -338,7 +338,7 @@ impl AnyFactory {
     ///
     /// Transient factories run here, in place: deferring them would cost an
     /// extra refcount round-trip on every resolution. Storage holds only a
-    /// shard *read* guard while they run. dashmap 6.1-6.2's `RawRwLock`
+    /// shard *read* guard while they run. dashmap's `RawRwLock` (5.5 through 6.2)
     /// admits readers unless a writer *holds* it (a waiting writer does not
     /// block them; this is an implementation detail, not dashmap API), so
     /// a transient factory may resolve services but must not register,

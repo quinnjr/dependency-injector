@@ -401,11 +401,12 @@ impl Container {
     ///
     /// The factory is called once on first access, then the instance is cached.
     ///
-    /// The factory may register, remove or clear services in this container
-    /// (registration still panics once the container is locked), except when
-    /// it is first resolved from inside a transient factory (see
-    /// [`Container::transient`]). It must not resolve its own type, directly
-    /// or through a dependency cycle: that blocks forever.
+    /// The factory runs without holding any storage lock, so it may register,
+    /// remove or clear services in this container (registration still panics
+    /// once the container is locked), unless a transient factory of that
+    /// container resolves this service, directly or through dependencies:
+    /// see [`Container::transient`]. It must not resolve its own type,
+    /// directly or through a dependency cycle: that blocks forever.
     ///
     /// # Examples
     ///
@@ -449,14 +450,17 @@ impl Container {
     ///
     /// A new instance is created on every resolve.
     ///
-    /// The factory may resolve services from this container, but must not
-    /// register, remove or clear services in it, directly or indirectly: it
-    /// runs while the storage holds a read lock, so writing to the same
-    /// container deadlocks. "Indirectly" includes a lazy service the factory
-    /// resolves for the first time (its initializer runs inside the factory)
-    /// and the `Drop` of any service the factory releases, including services
-    /// of *any* container that a resolution inside the factory evicts from
-    /// this thread's hot cache.
+    /// The factory runs while this container's storage holds a read lock. It
+    /// may resolve services, but nothing it runs or waits on may register,
+    /// remove or clear services in this container, or the write waits for the
+    /// read lock forever. That includes:
+    ///
+    /// - writes made by the factory itself;
+    /// - initializers of lazy services it resolves, whether the initializer
+    ///   runs inside the factory or on another thread the factory waits for;
+    /// - `Drop` of services it releases, including services of *any*
+    ///   container that a resolution inside the factory evicts from this
+    ///   thread's hot cache.
     ///
     /// # Examples
     ///
@@ -530,6 +534,7 @@ impl Container {
     /// Panics if `instance`'s concrete type does not match `type_id`, or if
     /// the container is locked.
     #[inline]
+    #[track_caller]
     pub fn register_by_id(&self, type_id: TypeId, instance: Arc<dyn Any + Send + Sync>) {
         // Resolution downcasts without re-checking the type, so the TypeId
         // must describe the instance exactly. Note `(*instance)`: calling
@@ -924,10 +929,14 @@ impl Container {
     ///
     /// Note: This also locks the container to prevent further registrations.
     ///
-    /// Lazy services are initialized during the freeze (after the storage's
-    /// locks are released), so the frozen storage is a snapshot: later
-    /// `remove`/`clear` calls on the container do not affect it. It also
-    /// keeps the container's services alive after the container is dropped.
+    /// Singleton and lazy services are snapshotted: lazies are initialized
+    /// during the freeze (after the storage's locks are released), and later
+    /// `remove`/`clear` calls on the container do not affect them. Transient
+    /// factories are shared with the container, so a transient that resolves
+    /// dependencies from it (e.g. one registered with `provide_transient`)
+    /// sees later `remove`/`clear` calls and fails if a dependency is gone.
+    /// The frozen storage keeps the container's services alive after the
+    /// container is dropped.
     ///
     /// # Example
     ///
