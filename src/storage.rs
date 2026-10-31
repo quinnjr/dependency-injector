@@ -5,10 +5,11 @@
 
 #![allow(dead_code)]
 
-use crate::factory::AnyFactory;
+use crate::factory::{AnyFactory, Resolution};
 use ahash::RandomState;
 use dashmap::DashMap;
 use std::any::{Any, TypeId};
+use std::cell::Cell;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -84,6 +85,11 @@ pub(crate) unsafe fn downcast_arc_unchecked<T: Send + Sync + 'static>(
     let ptr = Arc::into_raw(arc);
     // Fat-to-thin pointer cast extracts the data pointer, discarding vtable metadata.
     unsafe { Arc::from_raw(ptr as *const T) }
+}
+
+thread_local! {
+    /// Reusable buffer for `ServiceStorage::clear` (see there).
+    static CLEAR_SCRATCH: Cell<Vec<AnyFactory>> = const { Cell::new(Vec::new()) };
 }
 
 /// Thread-safe storage for service factories
@@ -182,9 +188,18 @@ impl ServiceStorage {
     }
 
     /// Resolve a service by TypeId
+    ///
+    /// Lazy initializers run after the DashMap shard guard is released, so
+    /// they may use this storage freely (see `AnyFactory::resolve_ready` for
+    /// transient factories).
     #[inline]
     pub fn resolve(&self, type_id: &TypeId) -> Option<Arc<dyn Any + Send + Sync>> {
-        self.factories.get(type_id).map(|f| f.resolve())
+        // The guard is a temporary of this statement and is dropped at its end.
+        let resolution = self.factories.get(type_id)?.resolve_ready();
+        Some(match resolution {
+            Resolution::Ready(service) => service,
+            Resolution::Deferred(factory) => factory.resolve(),
+        })
     }
 
     /// Try to resolve and downcast to T
@@ -206,13 +221,19 @@ impl ServiceStorage {
     #[inline]
     pub fn get_with_transient_flag<T: Send + Sync + 'static>(&self) -> Option<(Arc<T>, bool)> {
         let type_id = TypeId::of::<T>();
-        self.factories.get(&type_id).map(|factory| {
-            let is_transient = factory.is_transient();
-            let service = factory.resolve();
-            // SAFETY: We looked up by TypeId::of::<T>(), so the factory stores type T.
-            let typed = unsafe { downcast_arc_unchecked(service) };
-            (typed, is_transient)
-        })
+        // The guard is dropped at the end of this block, before any lazy
+        // initializer runs (see `resolve`).
+        let (resolution, is_transient) = {
+            let factory = self.factories.get(&type_id)?;
+            (factory.resolve_ready(), factory.is_transient())
+        };
+        let service = match resolution {
+            Resolution::Ready(service) => service,
+            Resolution::Deferred(factory) => factory.resolve(),
+        };
+        // SAFETY: We looked up by TypeId::of::<T>(), so the factory stores type T.
+        let typed = unsafe { downcast_arc_unchecked(service) };
+        Some((typed, is_transient))
     }
 
     /// Resolve a service by walking the full parent chain.
@@ -292,16 +313,32 @@ impl ServiceStorage {
     /// Services are dropped after their shard locks are released and the
     /// generation is bumped, so a service's `Drop` may use this storage
     /// (`DashMap::clear` would drop them under the write lock and deadlock).
+    ///
+    /// Not atomic with respect to concurrent registration: a service
+    /// registered while `clear` runs may survive it.
     #[inline]
     pub fn clear(&self) {
-        let keys: Vec<TypeId> = self.factories.iter().map(|entry| *entry.key()).collect();
-        let removed: Vec<_> = keys
-            .iter()
-            .filter_map(|key| self.factories.remove(key))
-            .collect();
+        // Move each factory out under the shard lock, leaving a `Vacant`
+        // placeholder whose drop runs no user code; the real factories (and the
+        // services they own) are dropped below, after the locks are gone.
+        // The buffer is a reused per-thread scratch Vec, so `ScopePool`
+        // release does not allocate.
+        // It is only taken once an entry is found, so clearing an empty
+        // storage does no extra work.
+        let mut removed: Option<Vec<AnyFactory>> = None;
+        self.factories.retain(|_, factory| {
+            removed
+                .get_or_insert_with(|| CLEAR_SCRATCH.try_with(Cell::take).unwrap_or_default())
+                .push(std::mem::replace(factory, AnyFactory::Vacant));
+            false
+        });
         // Release: see `insert`.
         self.generation.store(next_generation(), Ordering::Release);
-        drop(removed);
+        if let Some(mut removed) = removed {
+            // Drops services; a re-entrant `clear` takes a fresh buffer.
+            removed.clear();
+            let _ = CLEAR_SCRATCH.try_with(|scratch| scratch.set(removed));
+        }
     }
 
     /// Check if this storage has a parent
@@ -378,6 +415,9 @@ struct HashableTypeId(TypeId);
 /// Uses minimal perfect hashing (MPHF) for ~5ns faster resolution.
 #[cfg(feature = "perfect-hash")]
 pub struct FrozenStorage {
+    /// Keeps the source storage alive: factories registered through
+    /// `ServiceProvider` hold only a weak handle to it.
+    _source: Arc<ServiceStorage>,
     /// The perfect hash function
     mphf: boomphf::Mphf<HashableTypeId>,
     /// Factories indexed by perfect hash
@@ -394,7 +434,7 @@ impl FrozenStorage {
     ///
     /// This computes a minimal perfect hash function for all registered TypeIds,
     /// enabling O(1) lookups without hash collisions.
-    pub fn from_storage(storage: &ServiceStorage) -> Self {
+    pub(crate) fn from_storage(storage: &Arc<ServiceStorage>) -> Self {
         // Collect all entries as owned values
         let entries: Vec<(TypeId, AnyFactory)> = storage
             .factories
@@ -405,6 +445,7 @@ impl FrozenStorage {
         let n = entries.len();
         if n == 0 {
             return Self {
+                _source: Arc::clone(storage),
                 mphf: boomphf::Mphf::new(1.7, &[]),
                 factories: Vec::new(),
                 type_ids: Vec::new(),
@@ -443,6 +484,7 @@ impl FrozenStorage {
             .map(|p| Arc::new(Self::from_storage(p)));
 
         Self {
+            _source: Arc::clone(storage),
             mphf,
             factories,
             type_ids,
@@ -571,7 +613,7 @@ mod tests {
     #[cfg(feature = "perfect-hash")]
     #[test]
     fn test_frozen_storage() {
-        let storage = ServiceStorage::new();
+        let storage = Arc::new(ServiceStorage::new());
         storage.insert(
             TypeId::of::<TestService>(),
             AnyFactory::singleton(TestService { value: 42 }),
@@ -602,7 +644,7 @@ mod tests {
     #[cfg(feature = "perfect-hash")]
     #[test]
     fn test_frozen_storage_empty() {
-        let storage = ServiceStorage::new();
+        let storage = Arc::new(ServiceStorage::new());
         let frozen = FrozenStorage::from_storage(&storage);
 
         assert!(frozen.is_empty());

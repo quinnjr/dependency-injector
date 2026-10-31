@@ -232,7 +232,9 @@ pub trait ServiceProvider {
 
     /// Register a service as transient.
     ///
-    /// A new instance is created on every resolution.
+    /// A new instance is created on every resolution. As with
+    /// [`Container::transient`], `T::create` must not register, remove or
+    /// clear services in this container.
     fn provide_transient<T: Service>(&self);
 }
 
@@ -428,6 +430,49 @@ mod tests {
         // A factory holding a strong Container would keep the storage, and
         // with it the service, alive forever.
         assert_eq!(DROPPED.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn test_provided_transient_factories_are_freed_with_container() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        static DROPPED: AtomicUsize = AtomicUsize::new(0);
+
+        struct Tracked;
+        impl Drop for Tracked {
+            fn drop(&mut self) {
+                DROPPED.fetch_add(1, Ordering::SeqCst);
+            }
+        }
+
+        let container = Container::new();
+        container.singleton(Tracked);
+        container.provide_transient::<Database>();
+        container.provide::<Config>();
+        assert!(container.get::<Database>().is_ok());
+        drop(container);
+
+        // Tracked lives in the container's storage; it is only dropped if no
+        // factory keeps that storage alive.
+        assert_eq!(DROPPED.load(Ordering::SeqCst), 1);
+    }
+
+    #[cfg(feature = "perfect-hash")]
+    #[test]
+    fn test_frozen_provided_transient_outlives_container() {
+        let frozen = {
+            let container = Container::new();
+            container.provide::<Config>();
+            container.provide_transient::<Database>();
+            container.freeze()
+        };
+
+        let db = frozen
+            .resolve(&std::any::TypeId::of::<Database>())
+            .expect("transient registered")
+            .downcast::<Database>()
+            .unwrap();
+        assert_eq!(db.url, "debug://localhost");
     }
 
     #[derive(Clone)]

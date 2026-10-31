@@ -77,20 +77,28 @@ impl Factory for SingletonFactory {
 // =============================================================================
 
 /// Type-erased factory function
-type LazyInitFn = Arc<dyn Fn() -> Arc<dyn Any + Send + Sync> + Send + Sync>;
+type LazyInitFn = dyn Fn() -> Arc<dyn Any + Send + Sync> + Send + Sync;
 
 /// Lazy singleton factory - creates instance on first access
 ///
 /// Optimization: Stores type-erased factory and instance to avoid
 /// generic monomorphization overhead in hot paths.
 pub struct LazyFactory {
-    /// Type-erased factory function
-    init: LazyInitFn,
+    /// Shared so clones (handles taken out of storage before resolving, or
+    /// frozen copies) initialize and observe the same instance.
+    state: Arc<LazyState<LazyInitFn>>,
+}
+
+/// Generic over the init closure so it lives in the same allocation as the
+/// cell; `Arc<LazyState<F>>` unsizes to `Arc<LazyState<LazyInitFn>>`.
+struct LazyState<F: ?Sized> {
     /// Cached instance (type-erased)
     instance: OnceCell<Arc<dyn Any + Send + Sync>>,
     /// Type name for logging
     #[cfg(feature = "logging")]
     type_name: &'static str,
+    /// Type-erased factory function (last: it is the unsized field)
+    init: F,
 }
 
 impl LazyFactory {
@@ -101,35 +109,43 @@ impl LazyFactory {
         F: Fn() -> T + Send + Sync + 'static,
     {
         Self {
-            init: Arc::new(move || Arc::new(factory()) as Arc<dyn Any + Send + Sync>),
-            instance: OnceCell::new(),
-            #[cfg(feature = "logging")]
-            type_name: std::any::type_name::<T>(),
+            state: Arc::new(LazyState {
+                instance: OnceCell::new(),
+                #[cfg(feature = "logging")]
+                type_name: std::any::type_name::<T>(),
+                init: move || Arc::new(factory()) as Arc<dyn Any + Send + Sync>,
+            }),
         }
+    }
+
+    /// Get the instance if it has already been created
+    #[inline]
+    pub(crate) fn get(&self) -> Option<Arc<dyn Any + Send + Sync>> {
+        self.state.instance.get().map(Arc::clone)
     }
 
     /// Get the instance, creating it if necessary
     #[inline]
     pub fn resolve(&self) -> Arc<dyn Any + Send + Sync> {
         #[cfg(feature = "logging")]
-        let was_empty = self.instance.get().is_none();
+        let was_empty = self.state.instance.get().is_none();
 
-        let result = Arc::clone(self.instance.get_or_init(|| {
+        let result = Arc::clone(self.state.instance.get_or_init(|| {
             #[cfg(feature = "logging")]
             debug!(
                 target: "dependency_injector",
-                service = self.type_name,
+                service = self.state.type_name,
                 "Lazy singleton initializing on first access"
             );
 
-            (self.init)()
+            (self.state.init)()
         }));
 
         #[cfg(feature = "logging")]
         if !was_empty {
             trace!(
                 target: "dependency_injector",
-                service = self.type_name,
+                service = self.state.type_name,
                 "Lazy singleton already initialized, returning cached instance"
             );
         }
@@ -227,29 +243,48 @@ pub(crate) enum AnyFactory {
     Lazy(LazyFactory),
     /// Transient - new instance each time
     Transient(TransientFactory),
+    /// Holds nothing; dropping it runs no user code. Only exists transiently
+    /// inside `ServiceStorage::clear` and is never stored or resolved.
+    Vacant,
+}
+
+/// Panic for the `Vacant` invariant (kept out of line, off the hot paths).
+#[cold]
+#[inline(never)]
+fn vacant_factory_used() -> ! {
+    unreachable!("vacant factory is never stored or resolved")
 }
 
 impl Clone for AnyFactory {
-    /// Clone the factory. For Lazy factories, this forces resolution first
-    /// to ensure the cloned factory shares the same instance.
+    /// Clone the factory. Cheap and never runs user code: lazy clones share
+    /// the original's state (and therefore its instance), and transient
+    /// clones share the factory closure.
     fn clone(&self) -> Self {
         match self {
             AnyFactory::Singleton(f) => AnyFactory::Singleton(SingletonFactory {
                 instance: Arc::clone(&f.instance),
             }),
-            AnyFactory::Lazy(f) => {
-                // Force resolution and convert to singleton for the clone
-                // This ensures the frozen storage has a pre-resolved value
-                let instance = f.resolve();
-                AnyFactory::Singleton(SingletonFactory { instance })
-            }
+            AnyFactory::Lazy(f) => AnyFactory::Lazy(LazyFactory {
+                state: Arc::clone(&f.state),
+            }),
             AnyFactory::Transient(f) => AnyFactory::Transient(TransientFactory {
                 factory: Arc::clone(&f.factory),
                 #[cfg(feature = "logging")]
                 type_name: f.type_name,
             }),
+            AnyFactory::Vacant => AnyFactory::Vacant,
         }
     }
+}
+
+/// Outcome of [`AnyFactory::resolve_ready`].
+pub(crate) enum Resolution {
+    /// The instance already exists; no user code ran.
+    Ready(Arc<dyn Any + Send + Sync>),
+    /// A lazy service is not initialized yet; initializing it runs user code.
+    /// Holds a cheap clone of the factory (sharing its state) so the caller
+    /// can release any lock before calling [`AnyFactory::resolve`].
+    Deferred(AnyFactory),
 }
 
 impl AnyFactory {
@@ -284,6 +319,27 @@ impl AnyFactory {
             AnyFactory::Singleton(f) => f.resolve(),
             AnyFactory::Lazy(f) => f.resolve(),
             AnyFactory::Transient(f) => f.create(),
+            AnyFactory::Vacant => vacant_factory_used(),
+        }
+    }
+
+    /// Resolve, deferring lazy initialization (see [`Resolution`]).
+    ///
+    /// Transient factories run here, in place: deferring them would cost an
+    /// extra refcount round-trip on every resolution. Storage holds only a
+    /// shard *read* guard while they run, and DashMap's lock admits readers
+    /// unless a writer holds it, so a transient factory may resolve services
+    /// but must not register, remove or clear them in the same container.
+    #[inline]
+    pub(crate) fn resolve_ready(&self) -> Resolution {
+        match self {
+            AnyFactory::Singleton(f) => Resolution::Ready(f.resolve()),
+            AnyFactory::Lazy(f) => match f.get() {
+                Some(instance) => Resolution::Ready(instance),
+                None => Resolution::Deferred(self.clone()),
+            },
+            AnyFactory::Transient(f) => Resolution::Ready(f.create()),
+            AnyFactory::Vacant => vacant_factory_used(),
         }
     }
 

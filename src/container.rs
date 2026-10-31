@@ -22,6 +22,8 @@ use tracing::{debug, trace};
 /// 4 slots keeps the cache compact (a few cache lines) and provides good hit
 /// rates for typical apps.
 const HOT_CACHE_SLOTS: usize = 4;
+// `slot_for` keeps the top log2(HOT_CACHE_SLOTS) bits of a 64-bit product.
+const _: () = assert!(HOT_CACHE_SLOTS.is_power_of_two() && HOT_CACHE_SLOTS > 1);
 
 /// A cached service entry
 ///
@@ -440,6 +442,11 @@ impl Container {
     /// Register a transient service.
     ///
     /// A new instance is created on every resolve.
+    ///
+    /// The factory may resolve services from this container, but must not
+    /// register, remove or clear services in it: it runs while the storage
+    /// holds a read lock, so writing to the same container deadlocks. Lazy
+    /// factories ([`Container::lazy`]) have no such restriction.
     ///
     /// # Examples
     ///
@@ -906,6 +913,11 @@ impl Container {
     /// O(1) lookups without hash collisions, providing ~5ns faster resolution.
     ///
     /// Note: This also locks the container to prevent further registrations.
+    ///
+    /// Lazy services are shared with the container rather than initialized
+    /// at freeze time: whichever side resolves one first creates the single
+    /// instance both observe. The frozen storage keeps the container's
+    /// services alive after the container itself is dropped.
     ///
     /// # Example
     ///
@@ -1546,7 +1558,17 @@ mod tests {
     impl Drop for ResolvesOnDrop {
         fn drop(&mut self) {
             assert_eq!(*reentry_target().get::<u16>().unwrap(), 5);
+            let _ = RESOLVES_ON_DROP_DROPS.try_with(|n| n.set(n.get() + 1));
         }
+    }
+
+    thread_local! {
+        /// Per-thread count of `ResolvesOnDrop` drops (tests run in parallel).
+        static RESOLVES_ON_DROP_DROPS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    }
+
+    fn resolves_on_drop_drops() -> usize {
+        RESOLVES_ON_DROP_DROPS.with(std::cell::Cell::get)
     }
 
     #[test]
@@ -1569,7 +1591,9 @@ mod tests {
 
         // The hot cache now holds the last Arc<ResolvesOnDrop>; clearing it
         // runs Drop, which must not observe a live mutable borrow.
+        assert_eq!(resolves_on_drop_drops(), 0);
         Container::new().clear_cache();
+        assert_eq!(resolves_on_drop_drops(), 1);
     }
 
     #[test]
@@ -1577,31 +1601,64 @@ mod tests {
         reentry_target();
         cache_clear();
         // Find a storage pointer where u8 lands in ResolvesOnDrop's slot.
-        let storage_ptr = (1..)
-            .map(|i: usize| i << 4)
+        let storage_ptr = (1..=4096usize)
+            .map(|i| i << 4)
             .find(|&ptr| HotCache::slot_for::<u8>(ptr) == HotCache::slot_for::<ResolvesOnDrop>(ptr))
-            .unwrap();
+            .expect("no storage pointer maps u8 into ResolvesOnDrop's slot");
         cache_service(storage_ptr, 1, Arc::new(ResolvesOnDrop));
 
         // Evicts ResolvesOnDrop, running its Drop from inside `cache_service`.
+        assert_eq!(resolves_on_drop_drops(), 0);
         cache_service(storage_ptr, 1, Arc::new(1u8));
+        assert_eq!(resolves_on_drop_drops(), 1);
         // (Not asserting u8 is cached: Drop's own cache insert may evict it.)
         assert!(cache_get::<ResolvesOnDrop>(storage_ptr, 1).is_none());
     }
 
     #[test]
     fn test_cached_service_drop_at_thread_exit_can_resolve_services() {
+        use std::sync::atomic::AtomicUsize;
+
+        static DROPS: AtomicUsize = AtomicUsize::new(0);
+
+        struct ResolvesAtThreadExit;
+        impl Drop for ResolvesAtThreadExit {
+            fn drop(&mut self) {
+                assert_eq!(*reentry_target().get::<u16>().unwrap(), 5);
+                DROPS.fetch_add(1, Ordering::SeqCst);
+            }
+        }
+
         reentry_target();
         std::thread::spawn(|| {
             let container = Container::new();
-            container.singleton(ResolvesOnDrop);
-            let _ = container.get::<ResolvesOnDrop>().unwrap();
+            container.singleton(ResolvesAtThreadExit);
+            let _ = container.get::<ResolvesAtThreadExit>().unwrap();
             drop(container);
-            // The thread-local cache's destructor drops the last Arc, and
-            // ResolvesOnDrop resolves while the cache is being destroyed.
+            // The thread-local cache's destructor drops the last Arc, and the
+            // service resolves while the cache is being destroyed.
         })
         .join()
         .unwrap();
+        assert_eq!(DROPS.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn test_factories_run_outside_storage_locks() {
+        static TARGET: std::sync::OnceLock<Container> = std::sync::OnceLock::new();
+
+        #[derive(Debug)]
+        struct Registers;
+
+        let container = TARGET.get_or_init(Container::new);
+        // `clear` write-locks every shard; it deadlocks if the lazy
+        // initializer runs while `get` still holds the shard's read guard.
+        container.lazy(|| {
+            TARGET.get().unwrap().clear();
+            Registers
+        });
+        container.get::<Registers>().unwrap();
+        assert!(container.is_empty());
     }
 
     #[test]
