@@ -246,10 +246,9 @@ impl ServiceProvider for Container {
         // handle would form an Arc cycle and leak the container.
         let container = self.downgrade();
         self.lazy(move || {
-            let container = container
-                .upgrade()
-                .expect("container dropped while resolving a service");
-            let deps = T::Dependencies::resolve(&container)
+            let deps = container
+                .with(T::Dependencies::resolve)
+                .expect("container dropped while resolving a service")
                 .expect("Failed to resolve dependencies for service");
             T::create(deps)
         });
@@ -271,10 +270,9 @@ impl ServiceProvider for Container {
         // handle would form an Arc cycle and leak the container.
         let container = self.downgrade();
         self.transient(move || {
-            let container = container
-                .upgrade()
-                .expect("container dropped while resolving a transient service");
-            let deps = T::Dependencies::resolve(&container)
+            let deps = container
+                .with(T::Dependencies::resolve)
+                .expect("container dropped while resolving a transient service")
                 .expect("Failed to resolve dependencies for transient service");
             T::create(deps)
         });

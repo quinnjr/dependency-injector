@@ -249,15 +249,33 @@ pub(crate) struct WeakContainer {
 }
 
 impl WeakContainer {
-    /// Get the container back, or `None` if its storage has been dropped.
+    /// Run `f` with the container, or return `None` if its storage has been
+    /// dropped.
+    ///
+    /// Only the storage's strong count is touched (one upgrade and one
+    /// release): `provide_transient` factories call this on every
+    /// resolution, and cloning every handle into a fresh `Container` would
+    /// add shared-refcount traffic that scales badly across threads.
     #[inline]
-    pub(crate) fn upgrade(&self) -> Option<Container> {
-        Some(Container {
-            storage: self.storage.upgrade()?,
-            parent_storage: self.parent_storage.clone(),
-            locked: Arc::clone(&self.locked),
-            depth: self.depth,
-        })
+    pub(crate) fn with<R>(&self, f: impl FnOnce(&Container) -> R) -> Option<R> {
+        // Dropped normally (also on unwind), releasing the upgrade.
+        let storage = self.storage.upgrade()?;
+        // SAFETY: the fields are bitwise copies of `Arc`s that stay alive for
+        // the whole call: `storage` above, and `self`'s `parent_storage` and
+        // `locked`, which `&self` borrows. `ManuallyDrop` ensures the copies
+        // are never dropped, so no reference count is decremented without a
+        // matching increment. `Container` has no `Drop` impl, and `f` only
+        // gets a shared reference, so it cannot move the copies out (a
+        // `clone()` increments the counts as usual).
+        let container = std::mem::ManuallyDrop::new(unsafe {
+            Container {
+                storage: std::ptr::read(&raw const storage),
+                parent_storage: std::ptr::read(&raw const self.parent_storage),
+                locked: std::ptr::read(&raw const self.locked),
+                depth: self.depth,
+            }
+        });
+        Some(f(&container))
     }
 }
 
@@ -937,11 +955,11 @@ impl Container {
     /// factories are shared with the container, so a transient that resolves
     /// dependencies from it (e.g. one registered with `provide_transient`)
     /// sees later `remove`/`clear` calls and fails if a dependency is gone.
-    /// If transient factories are present, the frozen storage keeps the
-    /// container's storage (and its parents) alive after the container is
-    /// dropped, so do not register a frozen storage into the container it
-    /// was frozen from, or into any of its ancestors: that forms a cycle and
-    /// leaks both.
+    /// Each frozen level that contains transient factories keeps its source
+    /// storage (and that storage's ancestors) alive after the container is
+    /// dropped, so do not register such a frozen storage into one of those
+    /// ancestors: that forms a cycle and leaks both. (The container itself is
+    /// locked by `freeze`, so registering into it panics.)
     ///
     /// # Example
     ///
@@ -1438,6 +1456,11 @@ impl ScopePool {
         // stamps a fresh generation, invalidating hot cache entries for this
         // scope (including lingering clones of the container).
         container.storage.clear();
+        // A service's `Drop` may have registered into the scope during the
+        // clear; such a scope is not clean, so let it go instead of reusing.
+        if !container.storage.is_empty() {
+            return;
+        }
         // Reset lock state
         container.locked.store(false, Ordering::Relaxed);
 
@@ -1678,15 +1701,35 @@ mod tests {
         #[derive(Debug)]
         struct Registers;
 
-        let container = TARGET.get_or_init(Container::new);
         // `clear` write-locks every shard; it deadlocks if the lazy
         // initializer runs while `get` still holds the shard's read guard.
-        container.lazy(|| {
-            TARGET.get().unwrap().clear();
-            Registers
+        fail_on_deadlock("lazy initializer ran under a shard read guard", || {
+            let container = TARGET.get_or_init(Container::new);
+            container.lazy(|| {
+                TARGET.get().unwrap().clear();
+                Registers
+            });
+            container.get::<Registers>().unwrap();
+            assert!(container.is_empty());
         });
-        container.get::<Registers>().unwrap();
-        assert!(container.is_empty());
+    }
+
+    /// Run `f` on another thread, failing (instead of hanging the test run)
+    /// if it does not finish within a minute.
+    fn fail_on_deadlock(what: &str, f: impl FnOnce() + Send + 'static) {
+        let (done_tx, done_rx) = std::sync::mpsc::channel();
+        let worker = std::thread::spawn(move || {
+            f();
+            let _ = done_tx.send(());
+        });
+        match done_rx.recv_timeout(std::time::Duration::from_secs(60)) {
+            Ok(()) => worker.join().unwrap(),
+            // The worker panicked: re-raise its panic.
+            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+                std::panic::resume_unwind(worker.join().unwrap_err())
+            }
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => panic!("deadlock: {what}"),
+        }
     }
 
     #[test]
@@ -1766,10 +1809,32 @@ mod tests {
             }
         }
 
-        let container = TARGET.get_or_init(Container::new);
-        container.singleton(InspectsOnDrop);
-        container.clear();
-        assert!(container.is_empty());
+        fail_on_deadlock("clear dropped services under a shard write lock", || {
+            let container = TARGET.get_or_init(Container::new);
+            container.singleton(InspectsOnDrop);
+            container.clear();
+            assert!(container.is_empty());
+        });
+    }
+
+    #[test]
+    fn test_pool_does_not_reuse_scope_written_during_release() {
+        struct Marker;
+        struct RegistersOnDrop(Container);
+        impl Drop for RegistersOnDrop {
+            fn drop(&mut self) {
+                self.0.singleton(Marker);
+            }
+        }
+
+        let root = Container::new();
+        let pool = ScopePool::new(&root, 1);
+        {
+            let scope = pool.acquire();
+            scope.singleton(RegistersOnDrop(scope.clone()));
+        }
+        let scope = pool.acquire();
+        assert!(!scope.contains::<Marker>());
     }
 
     #[test]
