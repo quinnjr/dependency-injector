@@ -72,8 +72,9 @@ impl HotCache {
                 && entry.generation == generation
             {
                 // Cache hit - clone and downcast (unchecked since TypeId matches)
-                // SAFETY: entry.type_id == TypeId::of::<T>() and entries are only
-                // inserted with the TypeId of the Arc they hold, so it contains T.
+                // SAFETY: entry.type_id == TypeId::of::<T>(), and `insert` is
+                // generic over T and stores `TypeId::of::<T>()` alongside an
+                // `Arc<T>`, so the Arc contains T.
                 let arc = entry.service.clone();
                 return Some(unsafe { downcast_arc_unchecked(arc) });
             }
@@ -81,23 +82,35 @@ impl HotCache {
         None
     }
 
-    /// Insert a service into the cache for a specific container
+    /// Insert a service into the cache for a specific container.
+    ///
+    /// Returns the evicted entry instead of dropping it: dropping a service
+    /// can run user `Drop` code that re-enters the cache, so the caller must
+    /// drop it after the mutable borrow has ended.
     #[inline]
-    fn insert<T: Injectable>(&mut self, storage_ptr: usize, generation: u64, service: Arc<T>) {
+    #[must_use = "drop the evicted entry outside the hot cache borrow"]
+    fn insert<T: Injectable>(
+        &mut self,
+        storage_ptr: usize,
+        generation: u64,
+        service: Arc<T>,
+    ) -> Option<CacheEntry> {
         let slot = Self::slot_for::<T>(storage_ptr);
 
-        self.entries[slot] = Some(CacheEntry {
+        self.entries[slot].replace(CacheEntry {
             type_id: TypeId::of::<T>(),
             storage_ptr,
             generation,
             service: service as Arc<dyn Any + Send + Sync>,
-        });
+        })
     }
 
-    /// Clear the cache (call when container is modified)
+    /// Clear the cache, returning the old entries for the caller to drop
+    /// outside the mutable borrow (see [`HotCache::insert`]).
     #[inline]
-    fn clear(&mut self) {
-        self.entries = [const { None }; HOT_CACHE_SLOTS];
+    #[must_use = "drop the evicted entries outside the hot cache borrow"]
+    fn clear(&mut self) -> [Option<CacheEntry>; HOT_CACHE_SLOTS] {
+        std::mem::replace(&mut self.entries, [const { None }; HOT_CACHE_SLOTS])
     }
 
     /// Hash a TypeId for slot selection only (never used as a type check).
@@ -141,6 +154,9 @@ thread_local! {
 /// SAFETY: thread_local! guarantees single-threaded access, so we can use
 /// UnsafeCell without data races. We ensure no aliasing by limiting access
 /// to immutable borrows for reads and brief mutable borrows for writes.
+/// Closures passed to these helpers must not run user code (e.g. `Drop` of a
+/// service), since that could re-enter the cache while it is borrowed; evicted
+/// entries are returned and dropped after the borrow ends.
 #[inline(always)]
 fn with_hot_cache<F, R>(f: F) -> R
 where
@@ -446,8 +462,20 @@ impl Container {
     }
 
     /// Register by TypeId directly (advanced use).
+    ///
+    /// # Panics
+    ///
+    /// Panics if `instance`'s concrete type does not match `type_id`, or if
+    /// the container is locked.
     #[inline]
     pub fn register_by_id(&self, type_id: TypeId, instance: Arc<dyn Any + Send + Sync>) {
+        // Resolution downcasts without re-checking the type, so the TypeId
+        // must describe the instance exactly. Note `(*instance)`: calling
+        // `type_id()` on the Arc itself would yield the Arc's TypeId.
+        assert!(
+            (*instance).type_id() == type_id,
+            "register_by_id: instance's concrete type does not match type_id"
+        );
         self.check_not_locked();
 
         // Phase 2: Use the singleton factory with pre-erased Arc directly
@@ -543,9 +571,10 @@ impl Container {
 
             // Cache non-transient services (transients create new instances each time)
             if !is_transient {
-                with_hot_cache_mut(|cache| {
-                    cache.insert(storage_ptr, generation, Arc::clone(&service));
+                let evicted = with_hot_cache_mut(|cache| {
+                    cache.insert(storage_ptr, generation, Arc::clone(&service))
                 });
+                drop(evicted);
             }
 
             return Ok(service);
@@ -640,7 +669,8 @@ impl Container {
     /// entries cached for other containers.
     #[inline]
     pub fn clear_cache(&self) {
-        with_hot_cache_mut(HotCache::clear);
+        let evicted = with_hot_cache_mut(HotCache::clear);
+        drop(evicted);
     }
 
     /// Pre-warm the thread-local cache with a specific service type.
@@ -1422,7 +1452,7 @@ mod tests {
         let storage_ptr = 0x1000;
         let generation = 7;
         let mut cache = HotCache::new();
-        cache.insert(storage_ptr, generation, Arc::new(42u64));
+        let _ = cache.insert(storage_ptr, generation, Arc::new(42u64));
 
         // Simulate a slot collision: put the u64 entry where u32 would look.
         let from = HotCache::slot_for::<u64>(storage_ptr);
@@ -1433,6 +1463,51 @@ mod tests {
         assert!(cache.get::<u32>(storage_ptr, generation).is_none());
         cache.entries.swap(from, to);
         assert_eq!(*cache.get::<u64>(storage_ptr, generation).unwrap(), 42);
+    }
+
+    #[test]
+    #[should_panic(expected = "does not match type_id")]
+    fn test_register_by_id_rejects_mismatched_type() {
+        let container = Container::new();
+        container.register_by_id(TypeId::of::<String>(), Arc::new(7u8));
+    }
+
+    #[test]
+    fn test_register_by_id_accepts_matching_type() {
+        let container = Container::new();
+        container.register_by_id(TypeId::of::<u8>(), Arc::new(7u8));
+        assert_eq!(*container.get::<u8>().unwrap(), 7);
+    }
+
+    #[test]
+    fn test_evicted_service_drop_can_resolve_services() {
+        use std::sync::OnceLock;
+
+        static OTHER: OnceLock<Container> = OnceLock::new();
+
+        struct ResolvesOnDrop;
+        impl Drop for ResolvesOnDrop {
+            fn drop(&mut self) {
+                // Re-enters the hot cache (read + insert) from Drop.
+                let other = OTHER.get().unwrap();
+                assert_eq!(*other.get::<u16>().unwrap(), 5);
+            }
+        }
+
+        OTHER.get_or_init(|| {
+            let c = Container::new();
+            c.singleton(5u16);
+            c
+        });
+
+        let container = Container::new();
+        container.singleton(ResolvesOnDrop);
+        let _ = container.get::<ResolvesOnDrop>().unwrap();
+        drop(container);
+
+        // The hot cache now holds the last Arc<ResolvesOnDrop>; clearing it
+        // runs Drop, which must not observe a live mutable borrow.
+        Container::new().clear_cache();
     }
 
     #[test]

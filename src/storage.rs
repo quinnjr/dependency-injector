@@ -61,14 +61,24 @@ use std::hash::Hash;
 /// # Crate Invariants
 ///
 /// In this crate, safety is guaranteed because:
-/// - Factories are keyed by `TypeId::of::<T>()` at registration time
+/// - Typed registration keys factories by `TypeId::of::<T>()` and stores a `T`
+/// - `Container::register_by_id` asserts the instance's concrete `TypeId`
+///   equals the key before storing it
 /// - Resolution looks up by the same `TypeId::of::<T>()`
-/// - The factory stores the exact type that was registered
+/// - The hot cache stores `TypeId::of::<T>()` with each `Arc<T>` and compares
+///   it exactly on lookup
 /// - TypeId comparison is the same check that `Any::is::<T>()` performs
+///
+/// Debug builds additionally assert `is::<T>()` here.
 #[inline]
 pub(crate) unsafe fn downcast_arc_unchecked<T: Send + Sync + 'static>(
     arc: Arc<dyn Any + Send + Sync>,
 ) -> Arc<T> {
+    debug_assert!(
+        (*arc).is::<T>(),
+        "downcast_arc_unchecked: Arc does not contain {}",
+        std::any::type_name::<T>()
+    );
     // SAFETY: Caller guarantees arc contains type T (verified via TypeId lookup).
     // This is the same pattern used by std::sync::Arc::downcast.
     let ptr = Arc::into_raw(arc);

@@ -5,6 +5,25 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Fixed
+- **Hot cache type confusion (#58)**: the thread-local hot cache validated
+  entries with a 64-bit value read out of `TypeId` via `transmute_copy`
+  before an unchecked downcast. `TypeId` is 128 bits with an unspecified
+  layout, so a collision would read one service type as another. Entries now
+  store the full `TypeId` and compare it exactly; a hash of it is used only
+  for slot selection. The `perfect-hash` storage's `TypeId` hashing no longer
+  transmutes either.
+- **`register_by_id` accepted mismatched types**: registering an instance
+  under a `TypeId` that did not describe its concrete type let `get::<T>()`
+  reinterpret it as `T` (undefined behaviour from safe code). It now panics
+  on a mismatch.
+- **Hot cache re-entrancy from `Drop`**: evicting or clearing a cached
+  service whose `Drop` resolved services ran that code while the cache was
+  mutably borrowed (aliasing UB, confirmed with Miri). Evicted entries are
+  now dropped after the borrow ends.
+
 ## [2.1.0] - 2026-07-27
 
 ### Added
